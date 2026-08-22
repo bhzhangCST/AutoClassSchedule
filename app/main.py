@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from .assignment_rules import apply_required_teacher_assignments
 from .auth import (
     COOKIE_NAME,
     TOKEN_TTL_SECONDS,
@@ -74,6 +75,7 @@ class TeacherPayload(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     subject_ids: list[str] = Field(default_factory=list)
     min_weekly_lessons: int = Field(default=12, ge=0, le=35)
+    homeroom_class_id: str | None = Field(default=None, max_length=40)
 
 
 class AssignmentPayload(BaseModel):
@@ -184,17 +186,38 @@ def _validate_subject_ids(subject_ids: list[str]) -> list[str]:
     return unique
 
 
+def _validate_homeroom_class_id(
+    state: dict[str, Any], homeroom_class_id: str | None, teacher_id: str | None = None
+) -> str | None:
+    class_id = (homeroom_class_id or "").strip() or None
+    if not class_id:
+        return None
+    class_item = next((item for item in state["classes"] if item["id"] == class_id), None)
+    if not class_item:
+        raise HTTPException(status_code=422, detail="班主任班级不存在")
+    conflict = next(
+        (teacher for teacher in state["teachers"] if teacher["id"] != teacher_id and teacher.get("homeroom_class_id") == class_id),
+        None,
+    )
+    if conflict:
+        raise HTTPException(status_code=409, detail=f"{class_item['name']}的班主任已是{conflict['name']}")
+    return class_id
+
+
 @app.post("/api/teachers")
 def create_teacher(payload: TeacherPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     state = store.load()
     if any(item["name"] == payload.name.strip() for item in state["teachers"]):
         raise HTTPException(status_code=409, detail="教师姓名已存在")
+    homeroom_class_id = _validate_homeroom_class_id(state, payload.homeroom_class_id)
     state["teachers"].append({
         "id": f"t_{uuid.uuid4().hex[:10]}",
         "name": payload.name.strip(),
         "subject_ids": _validate_subject_ids(payload.subject_ids),
         "min_weekly_lessons": payload.min_weekly_lessons,
+        "homeroom_class_id": homeroom_class_id,
     })
+    apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
     return _state_response()
@@ -224,12 +247,12 @@ async def import_teachers(
         await file.close()
     if len(content) > MAX_TEACHER_IMPORT_BYTES:
         raise HTTPException(status_code=413, detail="教师名单不能超过5MB")
+    state = store.load()
     try:
         rows = parse_teacher_workbook(content)
+        summary = merge_teacher_rows(state, rows)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    state = store.load()
-    summary = merge_teacher_rows(state, rows)
     store.save(state)
     return {"import": summary, **_state_response()}
 
@@ -246,7 +269,9 @@ def update_teacher(teacher_id: str, payload: TeacherPayload, _: dict[str, Any] =
         "name": payload.name.strip(),
         "subject_ids": _validate_subject_ids(payload.subject_ids),
         "min_weekly_lessons": payload.min_weekly_lessons,
+        "homeroom_class_id": _validate_homeroom_class_id(state, payload.homeroom_class_id, teacher_id),
     })
+    apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
     return _state_response()
@@ -263,6 +288,7 @@ def delete_teacher(teacher_id: str, _: dict[str, Any] = Depends(require_auth)) -
         for subject_id, assigned_teacher in class_assignments.items():
             if assigned_teacher == teacher_id:
                 class_assignments[subject_id] = None
+    apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
     return _state_response()
@@ -305,6 +331,7 @@ def update_assignment_batch(
     }
     for class_id, assignments in normalized_by_class.items():
         state["assignments"][class_id] = assignments
+    apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
     return {"updated_classes": len(normalized_by_class), **_state_response()}
@@ -314,6 +341,7 @@ def update_assignment_batch(
 def update_assignments(class_id: str, payload: AssignmentPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     state = store.load()
     state["assignments"][class_id] = _normalized_class_assignments(state, class_id, payload.assignments)
+    apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
     return _state_response()

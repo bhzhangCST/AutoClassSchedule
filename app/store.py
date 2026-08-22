@@ -9,6 +9,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .assignment_rules import apply_required_teacher_assignments, normalize_teacher_records
 from .config import PROJECT_ROOT
 from .constants import CURRICULUM, GRADE_NAMES
 
@@ -37,7 +38,7 @@ def _default_classes(class_counts: dict[str, int] | None = None) -> list[dict[st
 def default_state() -> dict[str, Any]:
     classes = _default_classes()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "school_name": "高唐县民族实验小学",
         "class_counts": {str(grade): DEFAULT_CLASS_COUNT for grade in range(1, 7)},
         "classes": classes,
@@ -48,6 +49,17 @@ def default_state() -> dict[str, Any]:
         },
         "schedule": None,
     }
+
+
+def normalize_state(state: dict[str, Any]) -> bool:
+    changed = int(state.get("schema_version", 0)) < 3
+    if changed:
+        state["schema_version"] = 3
+    changed = normalize_teacher_records(state) or changed
+    changed = apply_required_teacher_assignments(state) or changed
+    if changed and state.get("schedule") is not None:
+        state["schedule"] = None
+    return changed
 
 
 class SettingsStoreMixin:
@@ -84,6 +96,11 @@ class SettingsStoreMixin:
                     for subject_id in CURRICULUM[item["grade"]]
                 }
 
+            valid_class_ids = {item["id"] for item in classes}
+            for teacher in state.get("teachers", []):
+                if teacher.get("homeroom_class_id") not in valid_class_ids:
+                    teacher["homeroom_class_id"] = None
+
             state.update({
                 "school_name": school_name.strip() or "未命名学校",
                 "class_counts": normalized,
@@ -91,6 +108,7 @@ class SettingsStoreMixin:
                 "assignments": assignments,
                 "schedule": None,
             })
+            apply_required_teacher_assignments(state)
             return self.save(state)
 
 
@@ -116,6 +134,8 @@ class StateStore(SettingsStoreMixin):
                 state = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 state = default_state()
+                self._write(state)
+            if normalize_state(state):
                 self._write(state)
             return deepcopy(state)
 
@@ -171,6 +191,8 @@ class UpstashStateStore(SettingsStoreMixin):
                 raise StorageError("云端课表数据格式无效，为避免覆盖已停止读取") from exc
             if not isinstance(state, dict):
                 raise StorageError("云端课表数据格式无效，为避免覆盖已停止读取")
+            if normalize_state(state):
+                self.save(state)
             return deepcopy(state)
 
     def save(self, state: dict[str, Any]) -> dict[str, Any]:

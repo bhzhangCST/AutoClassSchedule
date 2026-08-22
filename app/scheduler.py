@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
+from .assignment_rules import apply_required_teacher_assignments
 from .constants import (
     CORE_SUBJECTS,
     CURRICULUM,
@@ -107,7 +108,6 @@ def _validate_inputs(state: dict[str, Any]) -> tuple[list[str], list[str], dict[
     assignments = state.get("assignments", {})
     assigned_loads: Counter[str] = Counter()
     classes_by_teacher_subject: dict[tuple[str, str], set[str]] = defaultdict(set)
-
     for class_item in state.get("classes", []):
         class_id = class_item["id"]
         grade = int(class_item["grade"])
@@ -115,7 +115,6 @@ def _validate_inputs(state: dict[str, Any]) -> tuple[list[str], list[str], dict[
         actual = sum(CURRICULUM[grade].values())
         if expected != actual:
             errors.append(f"{class_item['name']}课程总课时为{actual}，但可用课位为{expected}。")
-
         for subject_id, hours in CURRICULUM[grade].items():
             teacher_id = _teacher_for(assignments, class_id, subject_id)
             if not teacher_id:
@@ -127,7 +126,7 @@ def _validate_inputs(state: dict[str, Any]) -> tuple[list[str], list[str], dict[
             assigned_loads[teacher_id] += hours
             classes_by_teacher_subject[(teacher_id, subject_id)].add(class_id)
             qualified = teacher.get("subject_ids", [])
-            if qualified and subject_id not in qualified:
+            if qualified and subject_id not in qualified and subject_id not in {"reading", "meeting"}:
                 warnings.append(f"{teacher['name']}未标注可任教{SUBJECT_BY_ID[subject_id]['name']}，但已被分配到{class_item['name']}。")
 
     for teacher_id, load in assigned_loads.items():
@@ -386,6 +385,7 @@ def _build_warnings_and_quality(
 
 def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: int = 80) -> dict[str, Any]:
     working_state = deepcopy(state)
+    apply_required_teacher_assignments(working_state)
     errors, warnings, assigned_loads = _validate_inputs(working_state)
     fixed_lessons, fixed_teacher_busy, fixed_conflicts = _prepare_fixed_lessons(working_state)
     errors.extend(fixed_conflicts)

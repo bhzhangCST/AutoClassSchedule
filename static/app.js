@@ -12,8 +12,7 @@ let pendingConfirm = null;
 const pageNames = {
   overview: ["工作台", "工作概览"],
   settings: ["基础配置", "学校与班级"],
-  teachers: ["资源配置", "教师管理"],
-  assignments: ["教学关系", "任课配置"],
+  teachers: ["资源配置", "教师与任课"],
   schedule: ["课表编排", "生成与查看课表"],
   rules: ["规则中心", "排课规则"],
 };
@@ -91,7 +90,7 @@ function applyStateResponse(data) {
 }
 
 function switchView(view) {
-  if (currentView === "assignments") captureCurrentAssignmentDraft();
+  if (currentView === "teachers") captureCurrentAssignmentDraft();
   currentView = view;
   document.querySelectorAll("[data-view-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.viewPanel === view));
   document.querySelectorAll(".nav-item").forEach((button) => button.classList.toggle("active", button.dataset.view === view));
@@ -202,6 +201,7 @@ function renderSettings() {
 
 function renderTeachers(filter = document.getElementById("teacher-search")?.value || "") {
   const subjects = subjectMap();
+  const classes = Object.fromEntries(appData.state.classes.map((item) => [item.id, item]));
   const loads = configuredTeacherLoads();
   const normalizedFilter = filter.trim().toLowerCase();
   const teachers = appData.state.teachers.filter((teacher) => teacher.name.toLowerCase().includes(normalizedFilter));
@@ -210,6 +210,7 @@ function renderTeachers(filter = document.getElementById("teacher-search")?.valu
   body.innerHTML = teachers.map((teacher) => `
     <tr>
       <td><span class="teacher-name">${escapeHtml(teacher.name)}</span></td>
+      <td>${teacher.homeroom_class_id ? `<span class="status-pill good">${escapeHtml(classes[teacher.homeroom_class_id]?.name || "班级已移除")}</span>` : '<span class="muted">—</span>'}</td>
       <td><div class="subject-tags">${teacher.subject_ids.length ? teacher.subject_ids.map((id) => `<span class="subject-tag">${escapeHtml(subjects[id]?.short || id)}</span>`).join("") : '<span class="muted">未限定课程</span>'}</div></td>
       <td>${loads[teacher.id] || 0} 节</td>
       <td>${teacher.min_weekly_lessons ? `${teacher.min_weekly_lessons} 节` : "不检查"}</td>
@@ -228,12 +229,27 @@ function renderTeacherSubjectOptions(selected = []) {
   `).join("");
 }
 
+function renderTeacherHomeroomOptions(teacher = null) {
+  const select = document.getElementById("teacher-homeroom-class");
+  const occupied = new Map(
+    appData.state.teachers
+      .filter((item) => item.homeroom_class_id && item.id !== teacher?.id)
+      .map((item) => [item.homeroom_class_id, item.name]),
+  );
+  select.innerHTML = `<option value="">不是班主任</option>${appData.state.classes.map((classItem) => {
+    const owner = occupied.get(classItem.id);
+    return `<option value="${classItem.id}" ${owner ? "disabled" : ""}>${escapeHtml(classItem.name)}${owner ? `（${escapeHtml(owner)}）` : ""}</option>`;
+  }).join("")}`;
+  select.value = teacher?.homeroom_class_id || "";
+}
+
 function openTeacherDialog(teacherId = null) {
   const teacher = teacherId ? appData.state.teachers.find((item) => item.id === teacherId) : null;
   document.getElementById("teacher-dialog-title").textContent = teacher ? "编辑教师" : "添加教师";
   document.getElementById("teacher-id").value = teacher?.id || "";
   document.getElementById("teacher-name").value = teacher?.name || "";
   document.getElementById("teacher-min-lessons").value = teacher?.min_weekly_lessons ?? 12;
+  renderTeacherHomeroomOptions(teacher);
   renderTeacherSubjectOptions(teacher?.subject_ids || []);
   document.getElementById("teacher-dialog").showModal();
   document.getElementById("teacher-name").focus();
@@ -322,8 +338,11 @@ function renderAssignments() {
   if (!classItem) return;
   const curriculum = appData.meta.curriculum[String(classItem.grade)];
   const assignments = appData.state.assignments[classItem.id] || {};
-  const displayAssignments = assignmentDrafts.get(classItem.id) || assignmentNamesFromState(classItem);
+  const displayAssignments = { ...(assignmentDrafts.get(classItem.id) || assignmentNamesFromState(classItem)) };
   const teachers = appData.state.teachers;
+  const teachersById = teacherMap();
+  displayAssignments.reading = displayAssignments.chinese || "";
+  displayAssignments.meeting = teachersById[assignments.meeting]?.name || "";
   const subjects = subjectMap();
   const assignedCount = Object.keys(curriculum).filter((subjectId) => displayAssignments[subjectId]).length;
   document.getElementById("assignment-grade-label").textContent = gradeNames[classItem.grade];
@@ -336,7 +355,8 @@ function renderAssignments() {
     const eligible = teachers.filter((teacher) => teacher.subject_ids.length === 0 || teacher.subject_ids.includes(subjectId) || teacher.id === assignedTeacher);
     const assignedName = displayAssignments[subjectId] || "";
     const listId = `teacher-options-${subjectId}`;
-    return `<div class="assignment-row"><div class="assignment-subject"><span class="subject-color" style="background:${subject.color}"></span><div><strong>${escapeHtml(subject.name)}</strong><span>每周 ${hours} 节</span></div></div><div class="teacher-search-field"><input type="search" list="${listId}" value="${escapeHtml(assignedName)}" placeholder="搜索教师姓名" aria-label="${escapeHtml(subject.name)}任课教师" data-assignment-subject="${subjectId}" data-eligible-teachers="${eligible.map((teacher) => teacher.id).join(",")}"><datalist id="${listId}">${eligible.map((teacher) => `<option value="${escapeHtml(teacher.name)}"></option>`).join("")}</datalist><span>${eligible.length} 名可选教师</span></div></div>`;
+    const lockedReason = subjectId === "reading" ? "随本班语文教师自动同步" : (subjectId === "meeting" ? "随本班班主任自动同步" : "");
+    return `<div class="assignment-row ${lockedReason ? "locked-assignment" : ""}"><div class="assignment-subject"><span class="subject-color" style="background:${subject.color}"></span><div><strong>${escapeHtml(subject.name)}</strong><span>每周 ${hours} 节</span></div></div><div class="teacher-search-field"><input type="search" list="${listId}" value="${escapeHtml(assignedName)}" placeholder="${lockedReason ? "自动设置" : "搜索教师姓名"}" aria-label="${escapeHtml(subject.name)}任课教师" data-assignment-subject="${subjectId}" data-eligible-teachers="${eligible.map((teacher) => teacher.id).join(",")}" ${lockedReason ? "disabled" : ""}><datalist id="${listId}">${eligible.map((teacher) => `<option value="${escapeHtml(teacher.name)}"></option>`).join("")}</datalist><span>${lockedReason || `${eligible.length} 名可选教师`}</span></div></div>`;
   }).join("");
   updateAssignmentDraftStatus();
 }
@@ -458,6 +478,7 @@ function buildPrintTimetable() {
   }
 
   const subjects = subjectMap();
+  const teachers = teacherMap();
   document.getElementById("print-title").textContent = scheduleMode === "class"
     ? `${appData.state.school_name}${classItem.name}课程表`
     : `${appData.state.school_name}${teacher.name}课程表`;
@@ -485,7 +506,7 @@ function buildPrintTimetable() {
       }
       const subject = subjects[lesson.subject_id];
       const primary = scheduleMode === "class" ? subject.name : lesson.class_name;
-      const secondary = scheduleMode === "class" ? "" : subject.name;
+      const secondary = scheduleMode === "class" ? (teachers[lesson.teacher_id]?.name || "") : subject.name;
       html += `<td><strong>${escapeHtml(primary)}</strong>${secondary ? `<span>${escapeHtml(secondary)}</span>` : ""}</td>`;
     }
     html += "</tr>";
@@ -660,7 +681,7 @@ document.getElementById("teacher-import-form").addEventListener("submit", async 
     applyStateResponse(data);
     document.getElementById("teacher-import-dialog").close();
     const summary = data.import;
-    showToast(`已处理 ${summary.total} 名教师：新增 ${summary.created}，更新 ${summary.updated}${summary.renamed ? `，同名区分 ${summary.renamed}` : ""}`);
+    showToast(`已处理 ${summary.total} 名教师：新增 ${summary.created}，更新 ${summary.updated}，任课 ${summary.assigned || 0} 项，班主任 ${summary.homerooms || 0} 项${summary.renamed ? `，同名区分 ${summary.renamed}` : ""}`);
   } catch (error) {
     result.textContent = error.message;
     result.classList.remove("hidden");
@@ -677,6 +698,7 @@ document.getElementById("teacher-form").addEventListener("submit", async (event)
     name: document.getElementById("teacher-name").value,
     min_weekly_lessons: Number(document.getElementById("teacher-min-lessons").value),
     subject_ids: [...document.querySelectorAll("#teacher-subject-options input:checked")].map((input) => input.value),
+    homeroom_class_id: document.getElementById("teacher-homeroom-class").value || null,
   };
   try {
     const data = await api(teacherId ? `/api/teachers/${teacherId}` : "/api/teachers", { method: teacherId ? "PUT" : "POST", body: JSON.stringify(payload) });
@@ -712,12 +734,13 @@ document.getElementById("assignment-form").addEventListener("submit", async (eve
         const name = (draft[subjectId] || "").trim();
         const teacher = name ? teachersByName.get(name) : null;
         if (name && !teacher) throw new Error(`${classItem.name}：未找到教师“${name}”，请从搜索建议中选择`);
+        const fixedTeacher = subjectId === "reading" || subjectId === "meeting";
         const eligible = teacher && (
           teacher.subject_ids.length === 0
           || teacher.subject_ids.includes(subjectId)
           || savedAssignments[subjectId] === teacher.id
         );
-        if (teacher && !eligible) throw new Error(`${classItem.name}：${teacher.name}未设置为该科目的可任教师`);
+        if (teacher && !fixedTeacher && !eligible) throw new Error(`${classItem.name}：${teacher.name}未设置为该科目的可任教师`);
         assignments[subjectId] = teacher?.id || null;
       }
       classes[classId] = assignments;
@@ -747,7 +770,12 @@ document.getElementById("assignment-class-select").addEventListener("change", (e
   renderAssignments();
 });
 document.getElementById("assignment-form").addEventListener("input", (event) => {
-  if (event.target.matches("[data-assignment-subject]")) captureCurrentAssignmentDraft();
+  if (!event.target.matches("[data-assignment-subject]")) return;
+  if (event.target.dataset.assignmentSubject === "chinese") {
+    const readingInput = document.querySelector('[data-assignment-subject="reading"]');
+    if (readingInput) readingInput.value = event.target.value;
+  }
+  captureCurrentAssignmentDraft();
 });
 window.addEventListener("beforeunload", (event) => {
   if (!assignmentDrafts.size) return;

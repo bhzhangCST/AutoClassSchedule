@@ -2,13 +2,29 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 
+from app.assignment_rules import apply_required_teacher_assignments
 from app.constants import CORE_SUBJECTS, CURRICULUM, DAYS, SMALL_CLASS_SUBJECTS, fixed_lessons_for_grade, slots_for_grade
 from app.scheduler import SLOT_META, generate_schedule
 from app.store import default_state
 
 
+def _configure_required_teachers(state: dict) -> None:
+    for class_item in state["classes"]:
+        teacher_id = f"t_required_{class_item['id']}"
+        state["teachers"].append({
+            "id": teacher_id,
+            "name": f"{class_item['name']}班主任",
+            "subject_ids": ["chinese"],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": class_item["id"],
+        })
+        state["assignments"][class_item["id"]]["chinese"] = teacher_id
+    apply_required_teacher_assignments(state)
+
+
 def test_default_state_generates_complete_schedule() -> None:
     state = default_state()
+    _configure_required_teachers(state)
     assert len(state["classes"]) == 36
     assert Counter(item["grade"] for item in state["classes"]) == Counter({grade: 6 for grade in range(1, 7)})
     result = generate_schedule(state, seed=202508, attempts=12)
@@ -27,11 +43,32 @@ def test_default_state_generates_complete_schedule() -> None:
                 assert lessons[f"{day['id']}-{period}"]["subject_id"] in CORE_SUBJECTS
 
 
+def test_schedule_allows_missing_chinese_teacher_and_homeroom() -> None:
+    state = default_state()
+    state["classes"] = [state["classes"][0]]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+
+    result = generate_schedule(state, seed=20260822, attempts=12)
+
+    assert result["success"], result.get("errors")
+    lessons = result["lessons"]["g1c1"]
+    assert lessons["wed-pm2"]["subject_id"] == "reading"
+    assert lessons["wed-pm2"]["teacher_id"] is None
+    assert lessons["mon-pm3"]["subject_id"] == "meeting"
+    assert lessons["mon-pm3"]["teacher_id"] is None
+
+
 def test_fixed_teacher_conflict_is_reported() -> None:
     state = default_state()
-    state["teachers"] = [{"id": "t_read", "name": "阅读教师", "subject_ids": ["reading"], "min_weekly_lessons": 0}]
-    state["assignments"]["g1c1"]["reading"] = "t_read"
-    state["assignments"]["g1c2"]["reading"] = "t_read"
+    state["classes"] = state["classes"][:2]
+    state["assignments"] = {item["id"]: state["assignments"][item["id"]] for item in state["classes"]}
+    state["teachers"] = [
+        {"id": "t_chinese", "name": "共享语文教师", "subject_ids": ["chinese"], "min_weekly_lessons": 0, "homeroom_class_id": "g1c1"},
+        {"id": "t_home2", "name": "二班班主任", "subject_ids": [], "min_weekly_lessons": 0, "homeroom_class_id": "g1c2"},
+    ]
+    state["assignments"]["g1c1"]["chinese"] = "t_chinese"
+    state["assignments"]["g1c2"]["chinese"] = "t_chinese"
+    apply_required_teacher_assignments(state)
 
     result = generate_schedule(state, seed=1, attempts=2)
     assert not result["success"]
@@ -40,7 +77,8 @@ def test_fixed_teacher_conflict_is_reported() -> None:
 
 def test_shared_teacher_never_double_books_and_low_load_warns() -> None:
     state = default_state()
-    state["teachers"] = [{"id": "t_math", "name": "数学教师", "subject_ids": ["math"], "min_weekly_lessons": 12}]
+    _configure_required_teachers(state)
+    state["teachers"].append({"id": "t_math", "name": "数学教师", "subject_ids": ["math"], "min_weekly_lessons": 12, "homeroom_class_id": None})
     state["assignments"]["g1c1"]["math"] = "t_math"
     state["assignments"]["g1c2"]["math"] = "t_math"
 
@@ -59,7 +97,8 @@ def test_small_course_teacher_can_cover_six_sibling_classes_without_conflict() -
     state = default_state()
     state["classes"] = [item for item in state["classes"] if item["grade"] == 1]
     state["assignments"] = {item["id"]: state["assignments"][item["id"]] for item in state["classes"]}
-    state["teachers"] = [{"id": "t_art", "name": "美术教师", "subject_ids": ["art"], "min_weekly_lessons": 0}]
+    _configure_required_teachers(state)
+    state["teachers"].append({"id": "t_art", "name": "美术教师", "subject_ids": ["art"], "min_weekly_lessons": 0, "homeroom_class_id": None})
     for class_item in state["classes"]:
         state["assignments"][class_item["id"]]["art"] = "t_art"
 
@@ -82,7 +121,8 @@ def test_small_course_teacher_shortfall_is_a_warning() -> None:
     state = default_state()
     state["classes"] = [state["classes"][0]]
     state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
-    state["teachers"] = [{"id": "t_music", "name": "音乐教师", "subject_ids": ["music"], "min_weekly_lessons": 0}]
+    _configure_required_teachers(state)
+    state["teachers"].append({"id": "t_music", "name": "音乐教师", "subject_ids": ["music"], "min_weekly_lessons": 0, "homeroom_class_id": None})
     state["assignments"]["g1c1"]["music"] = "t_music"
 
     result = generate_schedule(state, seed=17, attempts=12)
@@ -95,7 +135,8 @@ def test_english_teacher_over_three_classes_warns_but_still_schedules() -> None:
     state = default_state()
     state["classes"] = [item for item in state["classes"] if item["grade"] == 3][:4]
     state["assignments"] = {item["id"]: state["assignments"][item["id"]] for item in state["classes"]}
-    state["teachers"] = [{"id": "t_english", "name": "英语教师", "subject_ids": ["english"], "min_weekly_lessons": 0}]
+    _configure_required_teachers(state)
+    state["teachers"].append({"id": "t_english", "name": "英语教师", "subject_ids": ["english"], "min_weekly_lessons": 0, "homeroom_class_id": None})
     for class_item in state["classes"]:
         state["assignments"][class_item["id"]]["english"] = "t_english"
 
@@ -108,6 +149,7 @@ def test_multi_lesson_special_subjects_are_spread_across_days() -> None:
     state = default_state()
     state["classes"] = [state["classes"][12]]  # 三年级1班
     state["assignments"] = {"g3c1": state["assignments"]["g3c1"]}
+    _configure_required_teachers(state)
     result = generate_schedule(state, seed=20260822, attempts=40)
     assert result["success"], result.get("errors")
 
@@ -121,3 +163,18 @@ def test_multi_lesson_special_subjects_are_spread_across_days() -> None:
             if lesson["subject_id"] == subject_id
         }
         assert len(lesson_days) == min(hours, len(DAYS)), subject_id
+
+
+def test_reading_and_meeting_follow_required_teachers() -> None:
+    state = default_state()
+    state["classes"] = [state["classes"][0]]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+    _configure_required_teachers(state)
+    required_teacher = state["teachers"][0]["id"]
+
+    result = generate_schedule(state, seed=77, attempts=20)
+    assert result["success"], result.get("errors")
+    lessons = result["lessons"]["g1c1"]
+    assert lessons["wed-pm2"]["teacher_id"] == required_teacher
+    assert lessons["wed-pm3"]["teacher_id"] == required_teacher
+    assert lessons["mon-pm3"]["teacher_id"] == required_teacher

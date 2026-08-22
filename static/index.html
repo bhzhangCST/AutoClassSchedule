@@ -7,7 +7,7 @@
   <meta name="description" content="高唐县民族实验小学课程安排与教师任课管理系统">
   <title>小学课程安排</title>
   <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260822-5">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260822-8">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -45,8 +45,7 @@
         <nav class="nav-list" id="sidebar" aria-label="主导航">
           <button class="nav-item active" data-view="overview">工作概览</button>
           <button class="nav-item" data-view="settings">学校与班级</button>
-          <button class="nav-item" data-view="teachers">教师管理</button>
-          <button class="nav-item" data-view="assignments">任课配置</button>
+          <button class="nav-item" data-view="teachers">教师与任课</button>
           <button class="nav-item" data-view="schedule">生成课表</button>
           <button class="nav-item" data-view="rules">排课规则</button>
         </nav>
@@ -102,16 +101,14 @@
         </section>
 
         <section class="view" id="view-teachers" data-view-panel="teachers">
-          <div class="section-intro"><div><h3>教师管理</h3><p>同一教师可以承担多个兄弟班；音体美等小课教师建议承担6—12个班、每周不少于12节。</p></div><div class="button-row"><a class="outline-button" href="/api/teachers/import-template.xlsx">下载导入模板</a><button class="outline-button" id="import-teachers-button">批量导入</button><button class="primary-button" id="add-teacher-button">添加教师</button></div></div>
+          <div class="section-intro"><div><h3>教师与任课</h3><p>集中维护教师、班主任和各班任课关系；阅读随语文教师、班队会随班主任自动设置。</p></div><div class="button-row"><a class="outline-button" href="/api/teachers/import-template.xlsx">下载导入模板</a><button class="outline-button" id="import-teachers-button">批量导入</button><button class="primary-button" id="add-teacher-button">添加教师</button></div></div>
           <div class="panel table-panel">
             <div class="table-toolbar"><label class="search-box"><span class="sr-only">搜索教师</span><input id="teacher-search" placeholder="搜索教师"></label><span class="muted" id="teacher-count-label"></span></div>
-            <div class="responsive-table"><table><thead><tr><th>教师</th><th>可任课程</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
+            <div class="responsive-table"><table><thead><tr><th>教师</th><th>班主任</th><th>可任课程</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
             <div class="empty-state" id="teacher-empty"><div class="empty-icon">师</div><h4>还没有教师信息</h4><p>添加教师后，即可为每个班级配置任课关系并检查时间冲突。</p></div>
           </div>
-        </section>
-
-        <section class="view" id="view-assignments" data-view-panel="assignments">
-          <div class="section-intro"><div><h3>任课配置</h3><p>先选择年级和班级，再按姓名搜索任课教师。同一教师跨多个班任课时，系统会自动错开课时。</p></div></div>
+          <div class="subsection-divider"></div>
+          <div class="section-intro"><div><h3>按班级配置任课</h3><p>修改可以跨班暂存后统一保存。阅读和班队会为固定关联项，请分别修改语文教师和班主任。</p></div></div>
           <div class="assignment-layout">
             <form id="assignment-form" class="panel assignment-panel">
               <div class="assignment-selector-bar">
@@ -162,6 +159,7 @@
       <input type="hidden" id="teacher-id">
       <label class="wide-field"><span>教师姓名</span><input id="teacher-name" maxlength="40" required></label>
       <label class="wide-field"><span>期望最低周课时</span><input id="teacher-min-lessons" type="number" min="0" max="35" value="12"><small>小课教师按至少12节检查；其他教师设为0可不检查</small></label>
+      <label class="wide-field"><span>班主任班级</span><select id="teacher-homeroom-class"><option value="">不是班主任</option></select><small>每个班只能指定一名班主任；该班班队会将自动由此教师承担</small></label>
       <fieldset><legend>可任课程</legend><div id="teacher-subject-options" class="subject-options"></div></fieldset>
       <div class="modal-actions"><button class="ghost-button" id="cancel-teacher-dialog" type="button">取消</button><button class="primary-button" id="save-teacher-button" type="submit">保存教师</button></div>
     </form>
@@ -170,7 +168,7 @@
   <dialog id="teacher-import-dialog" class="modal">
     <form id="teacher-import-form">
       <div class="modal-heading"><div><p class="eyebrow">批量维护教师</p><h3>导入教师名单</h3></div><button class="icon-button" id="close-teacher-import-dialog" type="button" aria-label="关闭">×</button></div>
-      <p class="modal-description">上传使用模板填写的 .xlsx 文件。与现有名单重名的教师会更新；同一文件中的同名教师会自动增加序号区分。</p>
+      <p class="modal-description">模板可填写班主任班级和多个“班级：科目”任课关系，系统会从任课配置自动识别教师学科。与现有名单重名时更新，同一文件内重名会自动编号区分。</p>
       <label class="file-upload-field" for="teacher-import-file"><span>选择教师名单</span><input id="teacher-import-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required><small>最大 5MB。导入前会完整校验，存在无效行时不会写入。</small></label>
       <div class="import-result hidden" id="teacher-import-result" aria-live="polite"></div>
       <div class="modal-actions"><a class="ghost-button" href="/api/teachers/import-template.xlsx">下载模板</a><button class="ghost-button" id="cancel-teacher-import-dialog" type="button">取消</button><button class="primary-button" id="submit-teacher-import" type="submit">开始导入</button></div>
@@ -196,12 +194,16 @@
   </dialog>
 
   <section class="print-sheet" id="print-sheet" aria-hidden="true">
-    <h1 id="print-title"></h1>
+    <div class="print-heading">
+      <img class="print-logo" src="/static/logo.jpg" alt="高唐县民族实验小学校徽">
+      <h1 id="print-title"></h1>
+      <span class="print-heading-spacer" aria-hidden="true"></span>
+    </div>
     <p id="print-note"></p>
     <table class="print-timetable" id="print-timetable"></table>
   </section>
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260822-5" defer></script>
+  <script src="/assets/app.js?v=20260822-8" defer></script>
 </body>
 </html>

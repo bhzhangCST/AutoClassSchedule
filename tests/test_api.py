@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from pypdf import PdfReader
 
+from app.assignment_rules import apply_required_teacher_assignments
 from app import main
 from app.store import StateStore, StorageError, UpstashStateStore
 
@@ -26,7 +27,7 @@ def _teacher_import_file(rows: list[list[object]]) -> bytes:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "教师名单"
-    sheet.append(["教师姓名", "期望最低周课时", "可任科目"])
+    sheet.append(["教师姓名", "期望最低周课时", "是否班主任", "班主任班级", "任课配置"])
     for row in rows:
         sheet.append(row)
     output = BytesIO()
@@ -34,8 +35,36 @@ def _teacher_import_file(rows: list[list[object]]) -> bytes:
     return output.getvalue()
 
 
+def _configure_required_teachers(state: dict) -> None:
+    for class_item in state["classes"]:
+        teacher_id = f"t_required_{class_item['id']}"
+        state["teachers"].append({
+            "id": teacher_id,
+            "name": f"{class_item['name']}班主任",
+            "subject_ids": ["chinese"],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": class_item["id"],
+        })
+        state["assignments"][class_item["id"]]["chinese"] = teacher_id
+    apply_required_teacher_assignments(state)
+
+
+def _page_contains_image(page) -> bool:
+    resources = page.get("/Resources")
+    if not resources:
+        return False
+    xobjects = resources.get_object().get("/XObject")
+    if not xobjects:
+        return False
+    return any(item.get_object().get("/Subtype") == "/Image" for item in xobjects.get_object().values())
+
+
 def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
+    local_store = StateStore(tmp_path / "state.json")
+    configured_state = local_store.load()
+    _configure_required_teachers(configured_state)
+    local_store.save(configured_state)
+    monkeypatch.setattr(main, "store", local_store)
     client = TestClient(main.app)
 
     assert client.get("/health").json() == {"status": "ok"}
@@ -58,10 +87,15 @@ def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
     exported = client.get("/api/export/schedule.pdf")
     assert exported.status_code == 200
     assert exported.content.startswith(b"%PDF")
+    assert len(exported.content) < 2_000_000
     assert exported.headers["content-type"] == "application/pdf"
     full_pdf = PdfReader(BytesIO(exported.content))
     assert len(full_pdf.pages) == 36
-    assert "高唐县民族实验小学一年级1班课程表" in (full_pdf.pages[0].extract_text() or "")
+    first_page_text = full_pdf.pages[0].extract_text() or ""
+    assert "高唐县民族实验小学一年级1班课程表" in first_page_text
+    assert "一年级1班班主任" in first_page_text
+    assert float(full_pdf.pages[0].mediabox.height) > float(full_pdf.pages[0].mediabox.width)
+    assert _page_contains_image(full_pdf.pages[0])
 
     grade_export = client.get("/api/export/schedule.pdf?grade=3")
     assert grade_export.status_code == 200
@@ -75,14 +109,17 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
 
     index_response = client.get("/")
     assert index_response.status_code == 200
-    assert "/assets/styles.css?v=20260822-5" in index_response.text
-    assert "/assets/app.js?v=20260822-5" in index_response.text
+    assert "/assets/styles.css?v=20260822-8" in index_response.text
+    assert "/assets/app.js?v=20260822-8" in index_response.text
     assert 'value="teacher">指定教师' in index_response.text
     assert "teacher-export-class" not in index_response.text
     assert "/api/export/schedule.pdf" in index_response.text
+    assert 'data-view="assignments"' not in index_response.text
+    assert "教师与任课" in index_response.text
+    assert '<img class="print-logo" src="/static/logo.jpg"' in index_response.text
     assert "no-store" in index_response.headers["cache-control"]
 
-    script_response = client.get("/assets/app.js?v=20260822-5")
+    script_response = client.get("/assets/app.js?v=20260822-8")
     assert script_response.status_code == 200
     assert "no-store" in script_response.headers["cache-control"]
 
@@ -128,6 +165,40 @@ def test_batch_assignments_are_saved_atomically(tmp_path, monkeypatch) -> None:
     assert unchanged["assignments"][first_class["id"]]["math"] == teacher_id
 
 
+def test_homeroom_and_chinese_teacher_drive_fixed_courses(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
+    client = TestClient(main.app)
+    _login(client)
+
+    created = client.post(
+        "/api/teachers",
+        json={
+            "name": "一班语文班主任",
+            "subject_ids": ["chinese"],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": "g1c1",
+        },
+    )
+    assert created.status_code == 200
+    teacher_id = created.json()["state"]["teachers"][0]["id"]
+    assert created.json()["state"]["assignments"]["g1c1"]["meeting"] == teacher_id
+
+    assigned = client.put("/api/assignments/g1c1", json={"assignments": {"chinese": teacher_id}})
+    assert assigned.status_code == 200
+    assert assigned.json()["state"]["assignments"]["g1c1"]["reading"] == teacher_id
+
+    conflict = client.post(
+        "/api/teachers",
+        json={
+            "name": "冲突班主任",
+            "subject_ids": [],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": "g1c1",
+        },
+    )
+    assert conflict.status_code == 409
+
+
 def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
     client = TestClient(main.app)
@@ -137,10 +208,12 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     assert template.status_code == 200
     template_workbook = load_workbook(BytesIO(template.content))
     assert template_workbook.sheetnames == ["教师名单", "填写说明"]
-    assert [template_workbook["教师名单"].cell(1, column).value for column in range(1, 4)] == [
-        "教师姓名",
-        "期望最低周课时",
-        "可任科目",
+    assert [template_workbook["教师名单"].cell(1, column).value for column in range(1, 6)] == [
+        "教师姓名\n（必填）",
+        "期望最低周课时\n（0—35整数，0表示不检查）",
+        "是否班主任\n（填“是”或“否”）",
+        "班主任班级\n（完整班名或1.1，不支持范围）",
+        "任课配置\n（班级/范围：科目；如一年级1-7班：语文）",
     ]
     assert all(
         cell.fill.fill_type is None
@@ -148,14 +221,20 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
         for row in sheet.iter_rows()
         for cell in row
     )
+    assert template_workbook["教师名单"]["A2"].border.right.style == "thin"
+    assert template_workbook["教师名单"]["E2"].border.right.style == "thin"
+    assert {str(item.sqref) for item in template_workbook["教师名单"].data_validations.dataValidation} == {
+        "B2:B1001",
+        "C2:C1001",
+    }
 
     created = client.post("/api/teachers", json={"name": "王老师", "subject_ids": ["english"], "min_weekly_lessons": 8})
     assert created.status_code == 200
     template_sheet = template_workbook["教师名单"]
     for row_index, values in enumerate((
-        ["王老师", 12, "语文、数学"],
-        ["王老师", 10, "体育、音乐"],
-        ["李老师", 0, "科学，信息科技"],
+        ["王老师", 12, "是", "1.1", "一年级1-2班：语文、数学"],
+        ["王老师", 10, "否", "", "1.1：体育"],
+        ["李老师", 0, "否", "", ""],
     ), start=2):
         for column_index, value in enumerate(values, start=1):
             template_sheet.cell(row_index, column_index, value)
@@ -172,13 +251,24 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
         "updated": 1,
         "renamed": 1,
         "total": 3,
+        "assigned": 5,
+        "homerooms": 1,
         "details": [],
     }
     teachers = {item["name"]: item for item in imported.json()["state"]["teachers"]}
     assert set(teachers) == {"王老师", "王老师（2）", "李老师"}
     assert teachers["王老师"]["subject_ids"] == ["chinese", "math"]
     assert teachers["王老师"]["min_weekly_lessons"] == 12
-    assert teachers["王老师（2）"]["subject_ids"] == ["pe", "music"]
+    assert teachers["王老师（2）"]["subject_ids"] == ["pe"]
+    assert teachers["李老师"]["subject_ids"] == []
+    assert teachers["王老师"]["homeroom_class_id"] == "g1c1"
+    imported_state = imported.json()["state"]
+    assert imported_state["assignments"]["g1c1"]["chinese"] == teachers["王老师"]["id"]
+    assert imported_state["assignments"]["g1c1"]["reading"] == teachers["王老师"]["id"]
+    assert imported_state["assignments"]["g1c1"]["meeting"] == teachers["王老师"]["id"]
+    assert imported_state["assignments"]["g1c1"]["pe"] == teachers["王老师（2）"]["id"]
+    assert imported_state["assignments"]["g1c2"]["chinese"] == teachers["王老师"]["id"]
+    assert imported_state["assignments"]["g1c2"]["math"] == teachers["王老师"]["id"]
 
     imported_again = client.post(
         "/api/teachers/import",
@@ -189,21 +279,31 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     assert imported_again.json()["import"]["updated"] == 3
     assert len(imported_again.json()["state"]["teachers"]) == 3
 
-    bad_content = _teacher_import_file([["错误教师", 12, "不存在的科目"]])
+    bad_content = _teacher_import_file([["错误教师", 12, "否", "", "一年级1班：不存在的科目"]])
     rejected = client.post("/api/teachers/import", files={"file": ("bad.xlsx", bad_content)})
     assert rejected.status_code == 422
     assert len(client.get("/api/state").json()["state"]["teachers"]) == 3
 
+    bad_range = _teacher_import_file([["范围错误教师", 12, "否", "", "一年级1-7班：语文"]])
+    rejected_range = client.post("/api/teachers/import", files={"file": ("bad-range.xlsx", bad_range)})
+    assert rejected_range.status_code == 422
+    assert "一年级7班" in rejected_range.json()["detail"]
+
 
 def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
+    local_store = StateStore(tmp_path / "state.json")
+    scoped_state = local_store.load()
+    scoped_state["classes"] = [item for item in scoped_state["classes"] if item["id"] == "g3c1"]
+    scoped_state["assignments"] = {"g3c1": scoped_state["assignments"]["g3c1"]}
+    local_store.save(scoped_state)
+    monkeypatch.setattr(main, "store", local_store)
     client = TestClient(main.app)
     _login(client)
     teacher = client.post(
         "/api/teachers",
-        json={"name": "三年级数学教师", "subject_ids": ["math"], "min_weekly_lessons": 0},
+        json={"name": "三年级数学教师", "subject_ids": ["chinese", "math"], "min_weekly_lessons": 0, "homeroom_class_id": "g3c1"},
     ).json()["state"]["teachers"][0]
-    assigned = client.put("/api/assignments/g3c1", json={"assignments": {"math": teacher["id"]}})
+    assigned = client.put("/api/assignments/g3c1", json={"assignments": {"chinese": teacher["id"], "math": teacher["id"]}})
     assert assigned.status_code == 200
     generated = client.post("/api/schedule/generate", json={"seed": 818, "attempts": 40})
     assert generated.status_code == 200
@@ -225,11 +325,14 @@ def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> N
     single_export = client.get(f"/api/export/teacher.pdf?teacher_id={teacher['id']}")
     assert single_export.status_code == 200
     assert single_export.content.startswith(b"%PDF")
+    assert len(single_export.content) < 500_000
     assert single_export.headers["content-type"] == "application/pdf"
     assert single_export.headers["content-disposition"].endswith(".pdf")
     single_pdf = PdfReader(BytesIO(single_export.content))
     assert len(single_pdf.pages) == 1
     assert "高唐县民族实验小学三年级数学教师课程表" in (single_pdf.pages[0].extract_text() or "")
+    assert float(single_pdf.pages[0].mediabox.height) > float(single_pdf.pages[0].mediabox.width)
+    assert _page_contains_image(single_pdf.pages[0])
 
     assert client.get("/api/export/teachers.zip?grade=1").status_code == 409
     assert client.get("/api/export/teacher.pdf?teacher_id=missing").status_code == 404
@@ -250,7 +353,7 @@ def test_upstash_store_initializes_and_persists(monkeypatch) -> None:
     monkeypatch.setattr(cloud_store, "_execute", fake_execute)
     initial = cloud_store.load()
     assert initial["school_name"] == "高唐县民族实验小学"
-    assert json.loads(remote["test-state"])["schema_version"] == 2
+    assert json.loads(remote["test-state"])["schema_version"] == 3
 
     initial["school_name"] = "云端测试学校"
     cloud_store.save(initial)

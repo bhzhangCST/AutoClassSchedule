@@ -1,28 +1,33 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from html import escape
 from io import BytesIO
 from typing import Any
 
+from PIL import Image as PillowImage
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from reportlab.platypus import Image as ReportLabImage
 from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from .config import PROJECT_ROOT
 from .constants import DAYS, PERIODS, SUBJECT_BY_ID, slots_for_grade
 
 PDF_FONT = "STSong-Light"
 pdfmetrics.registerFont(UnicodeCIDFont(PDF_FONT))
 
-PAGE_SIZE = landscape(A4)
+PAGE_SIZE = A4
 PAGE_MARGIN = 10 * mm
 GRID_COLOR = colors.HexColor("#555555")
 HEADER_COLOR = colors.HexColor("#222222")
 MUTED_COLOR = colors.HexColor("#888888")
+LOGO_PATH = PROJECT_ROOT / "static" / "logo.jpg"
 
 
 def _validated_schedule(state: dict[str, Any]) -> dict[str, Any]:
@@ -65,17 +70,50 @@ def _title(value: str) -> Paragraph:
     )
 
 
+@lru_cache(maxsize=1)
+def _pdf_logo_bytes() -> bytes:
+    """Create a print-sized RGB copy so each exported PDF stays compact."""
+    with PillowImage.open(LOGO_PATH) as source:
+        source.thumbnail((600, 425), PillowImage.Resampling.LANCZOS)
+        image = source.convert("RGB")
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=85, optimize=True)
+        return output.getvalue()
+
+
+def _page_header(value: str) -> Table:
+    usable_width = PAGE_SIZE[0] - 2 * PAGE_MARGIN
+    logo_width = 20 * mm
+    logo_height = logo_width * 2480 / 3508
+    logo = ReportLabImage(BytesIO(_pdf_logo_bytes()), width=logo_width, height=logo_height)
+    header = Table(
+        [[logo, _title(value), ""]],
+        colWidths=[26 * mm, usable_width - 52 * mm, 26 * mm],
+        rowHeights=[16 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (0, 0), "LEFT"),
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return header
+
+
 def _schedule_table(cell_value: Any, unavailable_slots: set[str] | None = None) -> Table:
     unavailable_slots = unavailable_slots or set()
     rows: list[list[Any]] = [[
-        _paragraph("时段", size=11, bold=True),
-        _paragraph("节次", size=11, bold=True),
-        *[_paragraph(day["name"], size=11, bold=True) for day in DAYS],
+        _paragraph("时段", size=10, bold=True),
+        _paragraph("节次", size=10, bold=True),
+        *[_paragraph(day["name"], size=10, bold=True) for day in DAYS],
     ]]
     for index, period in enumerate(PERIODS):
         row: list[Any] = [
-            _paragraph(period["section"] if index in (0, 4) else "", size=12, bold=True),
-            _paragraph(f"第{period['order']}节", size=11, bold=True),
+            _paragraph(period["section"] if index in (0, 4) else "", size=10, bold=True),
+            _paragraph(f"第{period['order']}节", size=9, bold=True),
         ]
         for day in DAYS:
             slot = f"{day['id']}-{period['id']}"
@@ -88,8 +126,8 @@ def _schedule_table(cell_value: Any, unavailable_slots: set[str] | None = None) 
     usable_width = PAGE_SIZE[0] - 2 * PAGE_MARGIN
     table = Table(
         rows,
-        colWidths=[18 * mm, 20 * mm, *[(usable_width - 38 * mm) / 5] * 5],
-        rowHeights=[12 * mm, *[18 * mm] * len(PERIODS)],
+        colWidths=[14 * mm, 16 * mm, *[(usable_width - 30 * mm) / 5] * 5],
+        rowHeights=[12 * mm, *[34.5 * mm] * len(PERIODS)],
         repeatRows=1,
     )
     table.setStyle(TableStyle([
@@ -119,15 +157,15 @@ def _build_document(stories: list[tuple[str, Table]], *, title: str, author: str
         pagesize=PAGE_SIZE,
         leftMargin=PAGE_MARGIN,
         rightMargin=PAGE_MARGIN,
-        topMargin=10 * mm,
-        bottomMargin=8 * mm,
+        topMargin=8 * mm,
+        bottomMargin=7 * mm,
         title=title,
         author=author,
         subject="课程表",
     )
     story: list[Any] = []
     for index, (page_title, table) in enumerate(stories):
-        story.extend([_title(page_title), Spacer(1, 6 * mm), table])
+        story.extend([_page_header(page_title), Spacer(1, 4 * mm), table])
         if index < len(stories) - 1:
             story.append(PageBreak())
     document.build(story)
@@ -138,6 +176,7 @@ def _build_document(stories: list[tuple[str, Table]], *, title: str, author: str
 def build_class_schedule_pdf(state: dict[str, Any], grade: int | None = None) -> BytesIO:
     schedule = _validated_schedule(state)
     school_name = state.get("school_name", "")
+    teacher_map = {teacher["id"]: teacher["name"] for teacher in state.get("teachers", [])}
     classes = [
         class_item for class_item in state.get("classes", [])
         if grade is None or int(class_item["grade"]) == grade
@@ -157,7 +196,9 @@ def build_class_schedule_pdf(state: dict[str, Any], grade: int | None = None) ->
             if not lesson:
                 return _paragraph("", size=12)
             subject = SUBJECT_BY_ID.get(lesson.get("subject_id"), {"name": lesson.get("subject_id", "")})
-            return _paragraph(str(subject["name"]), size=12, bold=True)
+            teacher_name = teacher_map.get(lesson.get("teacher_id"), "")
+            value = str(subject["name"]) + (f"\n{teacher_name}" if teacher_name else "")
+            return _paragraph(value, size=9, leading=13, bold=True)
 
         stories.append((
             f"{school_name}{class_item['name']}课程表",
@@ -190,7 +231,7 @@ def build_teacher_schedule_pdf(state: dict[str, Any], teacher_id: str) -> BytesI
         class_item = class_map.get(class_id)
         subject = SUBJECT_BY_ID.get(lesson.get("subject_id"), {"name": lesson.get("subject_id", "")})
         class_name = class_item["name"] if class_item else class_id
-        return _paragraph(f"{class_name}\n{subject['name']}", size=10, leading=14, bold=True)
+        return _paragraph(f"{class_name}\n{subject['name']}", size=9, leading=13, bold=True)
 
     school_name = state.get("school_name", "")
     page_title = f"{school_name}{teacher['name']}课程表"
