@@ -7,6 +7,8 @@ let currentAssignmentGrade = 1;
 const assignmentDrafts = new Map();
 let scheduleMode = "class";
 let currentScheduleGrade = 1;
+let scheduleSwapDraft = null;
+let selectedSwapSlot = null;
 let pendingConfirm = null;
 
 const pageNames = {
@@ -41,7 +43,9 @@ async function api(path, options = {}) {
     throw new Error("登录已失效，请重新登录");
   }
   if (!response.ok) {
-    throw new Error(data?.detail || data || "请求失败");
+    const detail = data?.detail ?? data ?? "请求失败";
+    const message = Array.isArray(detail) ? detail.join("；") : (typeof detail === "object" ? JSON.stringify(detail) : detail);
+    throw new Error(message);
   }
   return data;
 }
@@ -381,12 +385,22 @@ function renderSchedule() {
   const schedule = appData.state.schedule;
   const exportButton = document.getElementById("export-button");
   const teacherExportButton = document.getElementById("teacher-export-button");
-  exportButton.classList.toggle("disabled", !schedule?.success);
-  teacherExportButton.classList.toggle("disabled", !schedule?.success);
-  teacherExportButton.disabled = !schedule?.success;
-  renderExportOptions();
+  if (scheduleSwapDraft && (!schedule?.success || !appData.state.classes.some((item) => item.id === scheduleSwapDraft.classId))) {
+    scheduleSwapDraft = null;
+    selectedSwapSlot = null;
+  }
+  const editing = Boolean(scheduleSwapDraft);
+  exportButton.classList.toggle("disabled", !schedule?.success || editing);
+  teacherExportButton.classList.toggle("disabled", !schedule?.success || editing);
+  exportButton.disabled = !schedule?.success || editing;
+  teacherExportButton.disabled = !schedule?.success || editing;
+  document.getElementById("generate-button").disabled = editing;
+  renderClassExportFilters();
   renderGenerationMessage(schedule);
-  document.querySelectorAll("[data-schedule-mode]").forEach((button) => button.classList.toggle("active", button.dataset.scheduleMode === scheduleMode));
+  document.querySelectorAll("[data-schedule-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.scheduleMode === scheduleMode);
+    button.disabled = editing;
+  });
 
   const gradeFilter = document.getElementById("schedule-grade-filter");
   const gradeSelect = document.getElementById("schedule-grade-select");
@@ -394,9 +408,12 @@ function renderSchedule() {
   if (!grades.includes(currentScheduleGrade)) currentScheduleGrade = grades[0] || 1;
   gradeSelect.innerHTML = grades.map((grade) => `<option value="${grade}">${gradeNames[grade]}</option>`).join("");
   gradeSelect.value = String(currentScheduleGrade);
+  gradeSelect.disabled = editing;
   gradeFilter.classList.toggle("hidden", scheduleMode !== "class");
   document.getElementById("schedule-entity-label").textContent = scheduleMode === "class" ? "班级" : "教师";
-  document.getElementById("print-button").textContent = scheduleMode === "class" ? "打印当前班级课表" : "打印当前教师课表";
+  const printButton = document.getElementById("print-button");
+  printButton.textContent = scheduleMode === "class" ? "打印当前班级课表" : "打印当前教师课表";
+  printButton.disabled = !schedule?.success || editing;
 
   const selector = document.getElementById("schedule-entity-select");
   const entities = scheduleMode === "class"
@@ -405,21 +422,33 @@ function renderSchedule() {
   const previous = selector.value;
   selector.innerHTML = entities.length ? entities.map((item) => `<option value="${item.id}">${escapeHtml(item.name)}</option>`).join("") : '<option value="">暂无可选数据</option>';
   if (entities.some((item) => item.id === previous)) selector.value = previous;
+  if (editing) selector.value = scheduleSwapDraft.classId;
+  selector.disabled = editing;
+  const editButton = document.getElementById("schedule-edit-button");
+  editButton.classList.toggle("hidden", scheduleMode !== "class" || editing);
+  editButton.disabled = !schedule?.success || !selector.value;
+  renderScheduleEditControls();
   renderTimetable();
 }
 
-function renderExportOptions() {
-  const select = document.getElementById("export-grade-select");
-  const previous = select.value;
-  const grades = [...new Set(appData.state.classes.map((item) => Number(item.grade)))].sort((left, right) => left - right);
-  select.innerHTML = `<option value="">全部年级</option>${grades.map((grade) => `<option value="${grade}">${gradeNames[grade]}</option>`).join("")}`;
-  if (["", ...grades.map(String)].includes(previous)) select.value = previous;
-  updateExportLink();
+function selectedExportFormat(name) {
+  return document.querySelector(`input[name="${name}"]:checked`)?.value || "pdf";
 }
 
-function updateExportLink() {
-  const grade = document.getElementById("export-grade-select").value;
-  document.getElementById("export-button").href = `/api/export/schedule.pdf${grade ? `?grade=${grade}` : ""}`;
+function renderClassExportFilters() {
+  const select = document.getElementById("class-export-grade");
+  const previous = Number(select.value) || currentScheduleGrade;
+  const grades = [...new Set(appData.state.classes.map((item) => Number(item.grade)))].sort((left, right) => left - right);
+  select.innerHTML = grades.map((grade) => `<option value="${grade}">${gradeNames[grade]}</option>`).join("");
+  select.value = String(grades.includes(previous) ? previous : grades[0]);
+  updateClassExportFields();
+}
+
+function updateClassExportFields() {
+  const scope = document.getElementById("class-export-scope").value;
+  const format = selectedExportFormat("class-export-format").toUpperCase();
+  document.getElementById("class-export-grade-field").classList.toggle("hidden", scope !== "grade");
+  document.getElementById("submit-class-export").textContent = `导出 ${format}`;
 }
 
 function renderTeacherExportFilters() {
@@ -450,9 +479,156 @@ function scheduledTeachers() {
 
 function updateTeacherExportFields() {
   const scope = document.getElementById("teacher-export-scope").value;
+  const format = selectedExportFormat("teacher-export-format");
   document.getElementById("teacher-export-grade-field").classList.toggle("hidden", scope !== "grade");
   document.getElementById("teacher-export-teacher-field").classList.toggle("hidden", scope !== "teacher");
-  document.getElementById("submit-teacher-export").textContent = scope === "teacher" ? "下载教师 PDF" : "下载 PDF 压缩包";
+  document.getElementById("submit-teacher-export").textContent = format === "xlsx"
+    ? "导出 XLSX"
+    : (scope === "teacher" ? "导出 PDF" : "导出 PDF 压缩包");
+}
+
+function slotLabel(slot) {
+  const [dayId, periodId] = slot.split("-");
+  const day = appData.meta.days.find((item) => item.id === dayId);
+  const period = appData.meta.periods.find((item) => item.id === periodId);
+  return `${day?.name || dayId}${period?.name || periodId}`;
+}
+
+function subjectAllowedInSlot(grade, subjectId, slot) {
+  const [dayId, periodId] = slot.split("-");
+  const coreSubjects = new Set(["chinese", "math", "english"]);
+  if (["am1", "am2"].includes(periodId)) {
+    if (!coreSubjects.has(subjectId)) return false;
+    if (Number(grade) <= 2 && subjectId === "english") return false;
+  }
+  if (subjectId === "english" && Number(grade) >= 3 && dayId === "mon" && ["pm1", "pm2"].includes(periodId)) return false;
+  if (subjectId === "chinese" && dayId === "tue" && ["pm1", "pm2"].includes(periodId)) return false;
+  if (subjectId === "math" && dayId === "thu" && ["pm1", "pm2"].includes(periodId)) return false;
+  return true;
+}
+
+function previewScheduleSwapConflicts() {
+  if (!scheduleSwapDraft) return [];
+  const classItem = appData.state.classes.find((item) => item.id === scheduleSwapDraft.classId);
+  if (!classItem) return ["班级不存在"];
+  const subjects = subjectMap();
+  const teachers = teacherMap();
+  const conflicts = [];
+  for (const [slot, lesson] of Object.entries(scheduleSwapDraft.lessons)) {
+    if (!subjectAllowedInSlot(classItem.grade, lesson.subject_id, slot)) {
+      conflicts.push(`${subjects[lesson.subject_id]?.name || lesson.subject_id}不能安排在${slotLabel(slot)}`);
+    }
+    if (!lesson.teacher_id) continue;
+    for (const otherClass of appData.state.classes) {
+      if (otherClass.id === classItem.id) continue;
+      if (appData.state.schedule.lessons[otherClass.id]?.[slot]?.teacher_id === lesson.teacher_id) {
+        conflicts.push(`${teachers[lesson.teacher_id]?.name || "未知教师"}在${slotLabel(slot)}还要为${otherClass.name}上课`);
+      }
+    }
+  }
+  return [...new Set(conflicts)];
+}
+
+function renderScheduleEditControls() {
+  const bar = document.getElementById("schedule-edit-bar");
+  const feedback = document.getElementById("schedule-edit-feedback");
+  const editing = Boolean(scheduleSwapDraft);
+  bar.classList.toggle("hidden", !editing);
+  if (!editing) {
+    feedback.classList.add("hidden");
+    feedback.classList.remove("conflict");
+    return;
+  }
+  const swapCount = scheduleSwapDraft.swaps.length;
+  document.getElementById("schedule-edit-status").textContent = selectedSwapSlot
+    ? `已选择${slotLabel(selectedSwapSlot)}，再选择另一节课即可交换`
+    : (swapCount ? `已暂存 ${swapCount} 次交换；可继续调整，最后统一保存` : "依次选择两节课进行交换；固定课程不可调整");
+  document.getElementById("undo-schedule-swap").disabled = swapCount === 0;
+  const conflicts = previewScheduleSwapConflicts();
+  scheduleSwapDraft.conflicts = conflicts;
+  document.getElementById("save-schedule-swaps").disabled = swapCount === 0 || conflicts.length > 0;
+  feedback.classList.toggle("hidden", swapCount === 0);
+  feedback.classList.toggle("conflict", conflicts.length > 0);
+  feedback.innerHTML = conflicts.length
+    ? `<strong>当前有 ${conflicts.length} 项冲突，请继续调整后再保存</strong><ul>${conflicts.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`
+    : "当前调整未发现教师时间或硬性排课规则冲突，可以保存。";
+}
+
+function startScheduleEdit() {
+  const classId = document.getElementById("schedule-entity-select").value;
+  const lessons = appData.state.schedule?.lessons?.[classId];
+  if (!lessons) {
+    showToast("请选择需要调整的班级", "error");
+    return;
+  }
+  scheduleSwapDraft = { classId, lessons: JSON.parse(JSON.stringify(lessons)), swaps: [], conflicts: [] };
+  selectedSwapSlot = null;
+  renderSchedule();
+}
+
+function selectScheduleSwapSlot(slot) {
+  if (!scheduleSwapDraft) return;
+  if (!selectedSwapSlot) {
+    selectedSwapSlot = slot;
+    renderScheduleEditControls();
+    renderTimetable();
+    return;
+  }
+  if (selectedSwapSlot === slot) {
+    selectedSwapSlot = null;
+    renderScheduleEditControls();
+    renderTimetable();
+    return;
+  }
+  const fromSlot = selectedSwapSlot;
+  const lessons = scheduleSwapDraft.lessons;
+  [lessons[fromSlot], lessons[slot]] = [lessons[slot], lessons[fromSlot]];
+  scheduleSwapDraft.swaps.push({ from_slot: fromSlot, to_slot: slot });
+  selectedSwapSlot = null;
+  renderScheduleEditControls();
+  renderTimetable();
+}
+
+function undoScheduleSwap() {
+  if (!scheduleSwapDraft?.swaps.length) return;
+  const lastSwap = scheduleSwapDraft.swaps.pop();
+  const lessons = scheduleSwapDraft.lessons;
+  [lessons[lastSwap.from_slot], lessons[lastSwap.to_slot]] = [lessons[lastSwap.to_slot], lessons[lastSwap.from_slot]];
+  selectedSwapSlot = null;
+  renderScheduleEditControls();
+  renderTimetable();
+}
+
+async function cancelScheduleEdit() {
+  if (scheduleSwapDraft?.swaps.length) {
+    const confirmed = await confirmDialog("放弃课表调整", "尚未保存的课程交换将全部撤销。当前已保存课表不会改变。");
+    if (!confirmed) return;
+  }
+  scheduleSwapDraft = null;
+  selectedSwapSlot = null;
+  renderSchedule();
+}
+
+async function saveScheduleSwaps() {
+  if (!scheduleSwapDraft?.swaps.length) return;
+  const button = document.getElementById("save-schedule-swaps");
+  setLoading(button, true, "校验并保存…");
+  try {
+    const data = await api("/api/schedule/swaps", {
+      method: "PUT",
+      body: JSON.stringify({ class_id: scheduleSwapDraft.classId, swaps: scheduleSwapDraft.swaps }),
+    });
+    const count = data.updated_swaps;
+    scheduleSwapDraft = null;
+    selectedSwapSlot = null;
+    applyStateResponse(data);
+    showToast(`已保存 ${count} 次课程交换，教师课表已同步更新`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setLoading(button, false);
+    if (scheduleSwapDraft) renderScheduleEditControls();
+  }
 }
 
 function lessonForTeacher(schedule, teacherId, slot) {
@@ -540,10 +716,13 @@ function renderTimetable() {
   const teachers = teacherMap();
   const classItem = scheduleMode === "class" ? appData.state.classes.find((item) => item.id === entityId) : null;
   const teacher = scheduleMode === "teacher" ? appData.state.teachers.find((item) => item.id === entityId) : null;
+  const editing = Boolean(scheduleSwapDraft && scheduleMode === "class" && scheduleSwapDraft.classId === entityId);
   title.textContent = classItem?.name || teacher?.name || "请选择";
-  subtitle.textContent = scheduleMode === "class" ? "班级周课程表" : "教师周课程表";
+  subtitle.textContent = editing ? "正在调整 · 尚未保存" : (scheduleMode === "class" ? "班级周课程表" : "教师周课程表");
   const rate = Math.round((schedule.quality?.morning_third_rate || 0) * 100);
-  qualityBadge.innerHTML = `<span class="quality-pill">核心课优先率 ${rate}%</span>`;
+  qualityBadge.innerHTML = editing
+    ? `<span class="quality-pill">${scheduleSwapDraft.swaps.length} 次交换待保存</span>`
+    : `<span class="quality-pill">核心课优先率 ${rate}%</span>`;
 
   let html = `<thead><tr><th class="period-cell">节次</th>${appData.meta.days.map((day) => `<th>${day.name}</th>`).join("")}</tr></thead><tbody>`;
   for (const period of appData.meta.periods) {
@@ -555,18 +734,30 @@ function renderTimetable() {
         html += '<td class="unavailable-cell">—</td>';
         continue;
       }
-      const lesson = scheduleMode === "class" ? schedule.lessons[entityId]?.[slot] : lessonForTeacher(schedule, entityId, slot);
+      const classLessons = editing ? scheduleSwapDraft.lessons : schedule.lessons[entityId];
+      const lesson = scheduleMode === "class" ? classLessons?.[slot] : lessonForTeacher(schedule, entityId, slot);
       if (!lesson) {
         html += "<td></td>";
         continue;
       }
       const subject = subjects[lesson.subject_id];
       const secondary = scheduleMode === "class" ? (teachers[lesson.teacher_id]?.name || "未分配教师") : lesson.class_name;
-      html += `<td><div class="lesson-card" style="--subject-color:${subject.color}"><strong>${escapeHtml(subject.name)}</strong><span>${escapeHtml(secondary)}</span></div></td>`;
+      const cardContent = `<strong>${escapeHtml(subject?.name || lesson.subject_id)}</strong><span>${escapeHtml(secondary)}</span>`;
+      if (editing) {
+        const fixed = Boolean(appData.meta.fixed_lessons[String(classItem.grade)]?.[slot] || lesson.fixed);
+        html += fixed
+          ? `<td><div class="lesson-card lesson-locked" style="--subject-color:${subject?.color || "#365f58"}" title="固定课程不能交换">${cardContent}</div></td>`
+          : `<td><button class="lesson-card lesson-swap-target ${selectedSwapSlot === slot ? "selected" : ""}" style="--subject-color:${subject?.color || "#365f58"}" type="button" data-swap-slot="${slot}" aria-pressed="${selectedSwapSlot === slot}">${cardContent}</button></td>`;
+      } else {
+        html += `<td><div class="lesson-card" style="--subject-color:${subject?.color || "#365f58"}">${cardContent}</div></td>`;
+      }
     }
     html += "</tr>";
   }
   table.innerHTML = `${html}</tbody>`;
+  table.querySelectorAll("[data-swap-slot]").forEach((button) => {
+    button.addEventListener("click", () => selectScheduleSwapSlot(button.dataset.swapSlot));
+  });
 }
 
 function renderRules() {
@@ -778,7 +969,7 @@ document.getElementById("assignment-form").addEventListener("input", (event) => 
   captureCurrentAssignmentDraft();
 });
 window.addEventListener("beforeunload", (event) => {
-  if (!assignmentDrafts.size) return;
+  if (!assignmentDrafts.size && !scheduleSwapDraft?.swaps.length) return;
   event.preventDefault();
   event.returnValue = "";
 });
@@ -813,22 +1004,46 @@ document.getElementById("schedule-grade-select").addEventListener("change", (eve
   currentScheduleGrade = Number(event.target.value);
   renderSchedule();
 });
-document.getElementById("export-grade-select").addEventListener("change", updateExportLink);
 document.getElementById("schedule-entity-select").addEventListener("change", renderTimetable);
 document.getElementById("print-button").addEventListener("click", printCurrentSchedule);
+document.getElementById("schedule-edit-button").addEventListener("click", startScheduleEdit);
+document.getElementById("undo-schedule-swap").addEventListener("click", undoScheduleSwap);
+document.getElementById("cancel-schedule-edit").addEventListener("click", cancelScheduleEdit);
+document.getElementById("save-schedule-swaps").addEventListener("click", saveScheduleSwaps);
 window.addEventListener("afterprint", () => document.getElementById("print-sheet").setAttribute("aria-hidden", "true"));
 
+document.getElementById("export-button").addEventListener("click", () => {
+  if (!appData.state.schedule?.success || scheduleSwapDraft) return;
+  renderClassExportFilters();
+  document.getElementById("class-export-dialog").showModal();
+});
+document.getElementById("close-class-export-dialog").addEventListener("click", () => document.getElementById("class-export-dialog").close());
+document.getElementById("cancel-class-export-dialog").addEventListener("click", () => document.getElementById("class-export-dialog").close());
+document.getElementById("class-export-scope").addEventListener("change", updateClassExportFields);
+document.querySelectorAll('input[name="class-export-format"]').forEach((input) => input.addEventListener("change", updateClassExportFields));
+document.getElementById("class-export-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const scope = document.getElementById("class-export-scope").value;
+  const format = selectedExportFormat("class-export-format");
+  const params = new URLSearchParams();
+  if (scope === "grade") params.set("grade", document.getElementById("class-export-grade").value);
+  document.getElementById("class-export-dialog").close();
+  window.location.assign(`/api/export/schedule.${format}${params.size ? `?${params}` : ""}`);
+});
+
 document.getElementById("teacher-export-button").addEventListener("click", () => {
-  if (!appData.state.schedule?.success) return;
+  if (!appData.state.schedule?.success || scheduleSwapDraft) return;
   renderTeacherExportFilters();
   document.getElementById("teacher-export-dialog").showModal();
 });
 document.getElementById("close-teacher-export-dialog").addEventListener("click", () => document.getElementById("teacher-export-dialog").close());
 document.getElementById("cancel-teacher-export-dialog").addEventListener("click", () => document.getElementById("teacher-export-dialog").close());
 document.getElementById("teacher-export-scope").addEventListener("change", updateTeacherExportFields);
+document.querySelectorAll('input[name="teacher-export-format"]').forEach((input) => input.addEventListener("change", updateTeacherExportFields));
 document.getElementById("teacher-export-form").addEventListener("submit", (event) => {
   event.preventDefault();
   const scope = document.getElementById("teacher-export-scope").value;
+  const format = selectedExportFormat("teacher-export-format");
   if (scope === "teacher") {
     const teacherName = document.getElementById("teacher-export-teacher").value.trim();
     const teacher = scheduledTeachers().find((item) => item.name === teacherName);
@@ -837,13 +1052,15 @@ document.getElementById("teacher-export-form").addEventListener("submit", (event
       return;
     }
     document.getElementById("teacher-export-dialog").close();
-    window.location.assign(`/api/export/teacher.pdf?teacher_id=${encodeURIComponent(teacher.id)}`);
+    const endpoint = format === "pdf" ? "/api/export/teacher.pdf" : "/api/export/teachers.xlsx";
+    window.location.assign(`${endpoint}?teacher_id=${encodeURIComponent(teacher.id)}`);
     return;
   }
   const params = new URLSearchParams();
   if (scope === "grade") params.set("grade", document.getElementById("teacher-export-grade").value);
   document.getElementById("teacher-export-dialog").close();
-  window.location.assign(`/api/export/teachers.zip${params.size ? `?${params}` : ""}`);
+  const endpoint = format === "pdf" ? "/api/export/teachers.zip" : "/api/export/teachers.xlsx";
+  window.location.assign(`${endpoint}${params.size ? `?${params}` : ""}`);
 });
 
 async function bootstrap() {

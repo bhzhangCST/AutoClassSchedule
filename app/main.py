@@ -27,9 +27,11 @@ from .auth import (
 )
 from .constants import CURRICULUM, DAYS, GRADE_NAMES, PERIODS, RULE_DESCRIPTIONS, SUBJECTS, fixed_lessons_for_grade
 from .pdf_export import build_class_schedule_pdf, build_teacher_schedule_pdf
+from .schedule_edit import ScheduleSwapError, apply_schedule_swaps
 from .scheduler import generate_schedule
 from .store import PROJECT_ROOT, StorageError, store
 from .teacher_import import merge_teacher_rows, parse_teacher_workbook
+from .xlsx_export import XLSX_MEDIA_TYPE, build_class_schedule_xlsx, build_teacher_schedules_xlsx
 
 STATIC_DIR = PROJECT_ROOT / "static"
 TEACHER_TEMPLATE_PATH = STATIC_DIR / "教师名单导入模板.xlsx"
@@ -89,6 +91,16 @@ class AssignmentBatchPayload(BaseModel):
 class GeneratePayload(BaseModel):
     seed: int | None = None
     attempts: int = Field(default=80, ge=1, le=300)
+
+
+class ScheduleSwapItem(BaseModel):
+    from_slot: str = Field(min_length=1, max_length=20)
+    to_slot: str = Field(min_length=1, max_length=20)
+
+
+class ScheduleSwapPayload(BaseModel):
+    class_id: str = Field(min_length=1, max_length=40)
+    swaps: list[ScheduleSwapItem] = Field(min_length=1, max_length=100)
 
 
 def _meta() -> dict[str, Any]:
@@ -357,6 +369,24 @@ def create_schedule(payload: GeneratePayload, _: dict[str, Any] = Depends(requir
     return {"result": result, **_state_response()}
 
 
+@app.put("/api/schedule/swaps")
+def save_schedule_swaps(
+    payload: ScheduleSwapPayload,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    state = store.load()
+    try:
+        apply_schedule_swaps(
+            state,
+            payload.class_id,
+            [item.model_dump() for item in payload.swaps],
+        )
+    except ScheduleSwapError as exc:
+        raise HTTPException(status_code=409, detail=exc.issues) from exc
+    store.save(state)
+    return {"updated_swaps": len(payload.swaps), **_state_response()}
+
+
 @app.get("/api/export/schedule.pdf")
 def export_schedule(
     grade: int | None = Query(default=None, ge=1, le=6),
@@ -371,6 +401,24 @@ def export_schedule(
     return StreamingResponse(
         output,
         media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.get("/api/export/schedule.xlsx")
+def export_schedule_xlsx(
+    grade: int | None = Query(default=None, ge=1, le=6),
+    _: dict[str, Any] = Depends(require_auth),
+) -> StreamingResponse:
+    state = store.load()
+    try:
+        output = build_class_schedule_xlsx(state, grade=grade)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    filename = f"{GRADE_NAMES[grade]}班级课程表.xlsx" if grade else "全部班级课程表.xlsx"
+    return StreamingResponse(
+        output,
+        media_type=XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
 
@@ -452,6 +500,37 @@ def export_single_teacher_schedule(
     return StreamingResponse(
         pdf,
         media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.get("/api/export/teachers.xlsx")
+def export_teacher_schedules_xlsx(
+    grade: int | None = Query(default=None, ge=1, le=6),
+    teacher_id: str | None = Query(default=None, min_length=1, max_length=40),
+    _: dict[str, Any] = Depends(require_auth),
+) -> StreamingResponse:
+    if grade is not None and teacher_id is not None:
+        raise HTTPException(status_code=422, detail="年级范围和指定教师不能同时选择")
+    state = store.load()
+    teacher = None
+    if teacher_id:
+        teacher = next((item for item in state.get("teachers", []) if item["id"] == teacher_id), None)
+        if not teacher:
+            raise HTTPException(status_code=404, detail="教师不存在")
+    try:
+        output = build_teacher_schedules_xlsx(state, grade=grade, teacher_id=teacher_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if teacher:
+        filename = f"{_safe_export_filename(teacher['name'], set())}课程表.xlsx"
+    elif grade is not None:
+        filename = f"{GRADE_NAMES[grade]}相关教师课表.xlsx"
+    else:
+        filename = "全部教师课表.xlsx"
+    return StreamingResponse(
+        output,
+        media_type=XLSX_MEDIA_TYPE,
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
 

@@ -102,6 +102,17 @@ def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
     assert len(PdfReader(BytesIO(grade_export.content)).pages) == 6
     assert client.get("/api/export/schedule.pdf?grade=7").status_code == 422
 
+    grade_xlsx = client.get("/api/export/schedule.xlsx?grade=3")
+    assert grade_xlsx.status_code == 200
+    assert grade_xlsx.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    class_workbook = load_workbook(BytesIO(grade_xlsx.content))
+    assert len(class_workbook.sheetnames) == 6
+    first_class_sheet = class_workbook[class_workbook.sheetnames[0]]
+    assert first_class_sheet["A1"].value == "高唐县民族实验小学三年级1班课程表"
+    assert first_class_sheet.page_setup.orientation == "portrait"
+    assert "A1:G1" in {str(item) for item in first_class_sheet.merged_cells.ranges}
+    assert all(cell.fill.fill_type is None for row in first_class_sheet.iter_rows() for cell in row)
+
 
 def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
@@ -109,17 +120,21 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
 
     index_response = client.get("/")
     assert index_response.status_code == 200
-    assert "/assets/styles.css?v=20260822-8" in index_response.text
-    assert "/assets/app.js?v=20260822-8" in index_response.text
+    assert "/assets/styles.css?v=20260822-9" in index_response.text
+    assert "/assets/app.js?v=20260822-9" in index_response.text
     assert 'value="teacher">指定教师' in index_response.text
     assert "teacher-export-class" not in index_response.text
-    assert "/api/export/schedule.pdf" in index_response.text
+    assert "批量导出课表" in index_response.text
+    assert "导出教师课表" in index_response.text
+    assert 'name="class-export-format"' in index_response.text
+    assert 'name="teacher-export-format"' in index_response.text
+    assert 'id="schedule-edit-button"' in index_response.text
     assert 'data-view="assignments"' not in index_response.text
     assert "教师与任课" in index_response.text
     assert '<img class="print-logo" src="/static/logo.jpg"' in index_response.text
     assert "no-store" in index_response.headers["cache-control"]
 
-    script_response = client.get("/assets/app.js?v=20260822-8")
+    script_response = client.get("/assets/app.js?v=20260822-9")
     assert script_response.status_code == 200
     assert "no-store" in script_response.headers["cache-control"]
 
@@ -334,8 +349,96 @@ def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> N
     assert float(single_pdf.pages[0].mediabox.height) > float(single_pdf.pages[0].mediabox.width)
     assert _page_contains_image(single_pdf.pages[0])
 
+    for url in (
+        "/api/export/teachers.xlsx",
+        "/api/export/teachers.xlsx?grade=3",
+        f"/api/export/teachers.xlsx?teacher_id={teacher['id']}",
+    ):
+        exported_xlsx = client.get(url)
+        assert exported_xlsx.status_code == 200, exported_xlsx.text
+        teacher_workbook = load_workbook(BytesIO(exported_xlsx.content))
+        assert teacher_workbook.sheetnames == ["三年级数学教师"]
+        teacher_sheet = teacher_workbook.active
+        assert teacher_sheet["A1"].value == "高唐县民族实验小学三年级数学教师课程表"
+        assert teacher_sheet.page_setup.orientation == "portrait"
+        assert all(cell.fill.fill_type is None for row in teacher_sheet.iter_rows() for cell in row)
+
     assert client.get("/api/export/teachers.zip?grade=1").status_code == 409
     assert client.get("/api/export/teacher.pdf?teacher_id=missing").status_code == 404
+    assert client.get("/api/export/teachers.xlsx?teacher_id=missing").status_code == 404
+
+
+def test_schedule_swaps_are_atomic_and_keep_teacher_views_consistent(tmp_path, monkeypatch) -> None:
+    local_store = StateStore(tmp_path / "state.json")
+    scoped_state = local_store.load()
+    scoped_state["classes"] = [item for item in scoped_state["classes"] if item["id"] in {"g3c1", "g3c2"}]
+    scoped_state["assignments"] = {
+        class_id: scoped_state["assignments"][class_id]
+        for class_id in ("g3c1", "g3c2")
+    }
+    local_store.save(scoped_state)
+    monkeypatch.setattr(main, "store", local_store)
+    client = TestClient(main.app)
+    _login(client)
+
+    generated = client.post("/api/schedule/generate", json={"seed": 20260822, "attempts": 20})
+    assert generated.status_code == 200
+    assert generated.json()["result"]["success"]
+
+    state = local_store.load()
+    first_subject = state["schedule"]["lessons"]["g3c1"]["mon-am3"]["subject_id"]
+    second_subject = state["schedule"]["lessons"]["g3c2"]["tue-am3"]["subject_id"]
+    state["teachers"].append({
+        "id": "t_manual",
+        "name": "手动调整测试教师",
+        "subject_ids": list(dict.fromkeys([first_subject, second_subject])),
+        "min_weekly_lessons": 0,
+        "homeroom_class_id": None,
+    })
+    state["schedule"]["lessons"]["g3c1"]["mon-am3"]["teacher_id"] = "t_manual"
+    state["schedule"]["lessons"]["g3c2"]["tue-am3"]["teacher_id"] = "t_manual"
+    local_store.save(state)
+    before_lessons = local_store.load()["schedule"]["lessons"]
+
+    fixed_rejected = client.put(
+        "/api/schedule/swaps",
+        json={"class_id": "g3c1", "swaps": [{"from_slot": "mon-pm3", "to_slot": "mon-am3"}]},
+    )
+    assert fixed_rejected.status_code == 409
+    assert "固定课位" in "；".join(fixed_rejected.json()["detail"])
+    assert local_store.load()["schedule"]["lessons"] == before_lessons
+
+    conflict = client.put(
+        "/api/schedule/swaps",
+        json={"class_id": "g3c1", "swaps": [{"from_slot": "mon-am3", "to_slot": "tue-am3"}]},
+    )
+    assert conflict.status_code == 409
+    assert "手动调整测试教师" in "；".join(conflict.json()["detail"])
+    assert local_store.load()["schedule"]["lessons"] == before_lessons
+
+    saved = client.put(
+        "/api/schedule/swaps",
+        json={
+            "class_id": "g3c1",
+            "swaps": [
+                {"from_slot": "mon-am3", "to_slot": "wed-am3"},
+                {"from_slot": "wed-am3", "to_slot": "fri-am3"},
+            ],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    schedule = saved.json()["state"]["schedule"]
+    assert saved.json()["updated_swaps"] == 2
+    assert schedule["manual_swap_count"] == 2
+    assert schedule["edited_at"]
+    assert schedule["lessons"]["g3c1"]["fri-am3"]["teacher_id"] == "t_manual"
+    assert schedule["lessons"]["g3c1"]["fri-am3"]["subject_id"] == first_subject
+    assert schedule["lessons"]["g3c1"]["mon-am3"]["teacher_id"] is None
+
+    teacher_xlsx = client.get("/api/export/teachers.xlsx?teacher_id=t_manual")
+    assert teacher_xlsx.status_code == 200
+    teacher_sheet = load_workbook(BytesIO(teacher_xlsx.content)).active
+    assert str(teacher_sheet["G5"].value).startswith("三年级1班\n")
 
 
 def test_upstash_store_initializes_and_persists(monkeypatch) -> None:

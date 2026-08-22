@@ -7,7 +7,7 @@
   <meta name="description" content="高唐县民族实验小学课程安排与教师任课管理系统">
   <title>小学课程安排</title>
   <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260822-8">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260822-9">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -123,7 +123,7 @@
         </section>
 
         <section class="view" id="view-schedule" data-view-panel="schedule">
-          <div class="section-intro"><div><h3>生成与查看课表</h3><p>系统会多次尝试，在满足硬性规则的前提下优先提高上午核心课比例。</p></div><div class="button-row schedule-actions"><label class="export-grade-filter"><span>班级课表范围</span><select id="export-grade-select" aria-label="选择导出年级"><option value="">全部年级</option></select></label><a class="outline-button disabled" id="export-button" href="/api/export/schedule.pdf">批量打印班级课表</a><button class="outline-button disabled" id="teacher-export-button">导出教师 PDF</button><button class="primary-button" id="generate-button">生成新课表</button></div></div>
+          <div class="section-intro"><div><h3>生成与查看课表</h3><p>系统会多次尝试，在满足硬性规则的前提下优先提高上午核心课比例。</p></div><div class="button-row schedule-actions"><button class="outline-button disabled" id="export-button" type="button">批量导出课表</button><button class="outline-button disabled" id="teacher-export-button" type="button">导出教师课表</button><button class="primary-button" id="generate-button">生成新课表</button></div></div>
           <article class="panel generation-panel">
             <div class="generation-copy"><div><h4>按既定约束排课</h4><p>固定连堂、教研避让、教师不冲突、核心课优先</p></div></div>
             <div class="generation-options"><label>随机种子<input id="schedule-seed" type="number" placeholder="自动"></label><label>最大尝试次数<input id="schedule-attempts" type="number" min="1" max="300" value="80"></label></div>
@@ -135,7 +135,13 @@
               <label class="schedule-filter" id="schedule-grade-filter"><span>年级</span><select id="schedule-grade-select" aria-label="选择年级"></select></label>
               <label class="schedule-filter schedule-entity-filter"><span id="schedule-entity-label">班级</span><select id="schedule-entity-select" aria-label="选择班级或教师"></select></label>
               <button class="ghost-button" id="print-button">打印当前课表</button>
+              <button class="outline-button" id="schedule-edit-button" type="button">调整课表</button>
             </div>
+            <div class="schedule-edit-bar hidden" id="schedule-edit-bar" aria-live="polite">
+              <div class="schedule-edit-copy"><strong>课表调整模式</strong><span id="schedule-edit-status">依次选择两节课进行交换</span></div>
+              <div class="schedule-edit-actions"><button class="ghost-button" id="undo-schedule-swap" type="button">撤销上一步</button><button class="ghost-button" id="cancel-schedule-edit" type="button">取消调整</button><button class="primary-button" id="save-schedule-swaps" type="button">保存调整</button></div>
+            </div>
+            <div class="schedule-edit-feedback hidden" id="schedule-edit-feedback" aria-live="polite"></div>
             <div class="timetable-title"><div><p class="eyebrow" id="timetable-subtitle">班级课表</p><h3 id="timetable-title">尚未生成</h3></div><div id="quality-badge"></div></div>
             <div class="timetable-scroll"><table class="timetable" id="timetable"></table></div>
           </article>
@@ -175,14 +181,32 @@
     </form>
   </dialog>
 
+  <dialog id="class-export-dialog" class="modal compact-modal">
+    <form id="class-export-form">
+      <div class="modal-heading"><div><p class="eyebrow">班级课表</p><h3>批量导出课表</h3></div><button class="icon-button" id="close-class-export-dialog" type="button" aria-label="关闭">×</button></div>
+      <p class="modal-description">按全部年级或指定年级导出。PDF 为连续页面，XLSX 中每个班级单独一张工作表。</p>
+      <label class="wide-field"><span>导出范围</span><select id="class-export-scope"><option value="all">全部年级</option><option value="grade">指定年级</option></select></label>
+      <label class="wide-field hidden" id="class-export-grade-field"><span>年级</span><select id="class-export-grade"></select></label>
+      <fieldset class="export-format-field"><legend>文件格式</legend><div class="export-format-options">
+        <label><input type="radio" name="class-export-format" value="pdf" checked><span><strong>PDF</strong><small>适合打印与直接发送</small></span></label>
+        <label><input type="radio" name="class-export-format" value="xlsx"><span><strong>XLSX</strong><small>适合留档与二次查看</small></span></label>
+      </div></fieldset>
+      <div class="modal-actions"><button class="ghost-button" id="cancel-class-export-dialog" type="button">取消</button><button class="primary-button" id="submit-class-export" type="submit">导出 PDF</button></div>
+    </form>
+  </dialog>
+
   <dialog id="teacher-export-dialog" class="modal compact-modal">
     <form id="teacher-export-form">
       <div class="modal-heading"><div><p class="eyebrow">教师课表</p><h3>导出教师课表</h3></div><button class="icon-button" id="close-teacher-export-dialog" type="button" aria-label="关闭">×</button></div>
-      <p class="modal-description">可批量导出全部或指定年级的任课教师，每位教师一份 PDF；也可按姓名搜索并单独下载。</p>
+      <p class="modal-description">可批量导出全部或指定年级的任课教师，也可按姓名搜索单独导出。PDF 批量导出会打包为 ZIP。</p>
       <label class="wide-field"><span>导出范围</span><select id="teacher-export-scope"><option value="all">全部已排课教师</option><option value="grade">任教指定年级的教师</option><option value="teacher">指定教师</option></select></label>
       <label class="wide-field hidden" id="teacher-export-grade-field"><span>年级</span><select id="teacher-export-grade"></select></label>
       <label class="wide-field hidden" id="teacher-export-teacher-field"><span>教师</span><input id="teacher-export-teacher" type="search" list="teacher-export-teacher-options" placeholder="输入教师姓名搜索" autocomplete="off"><datalist id="teacher-export-teacher-options"></datalist></label>
-      <div class="modal-actions"><button class="ghost-button" id="cancel-teacher-export-dialog" type="button">取消</button><button class="primary-button" id="submit-teacher-export" type="submit">下载 PDF 压缩包</button></div>
+      <fieldset class="export-format-field"><legend>文件格式</legend><div class="export-format-options">
+        <label><input type="radio" name="teacher-export-format" value="pdf" checked><span><strong>PDF</strong><small>批量导出时每位教师一份</small></span></label>
+        <label><input type="radio" name="teacher-export-format" value="xlsx"><span><strong>XLSX</strong><small>每位教师单独一张工作表</small></span></label>
+      </div></fieldset>
+      <div class="modal-actions"><button class="ghost-button" id="cancel-teacher-export-dialog" type="button">取消</button><button class="primary-button" id="submit-teacher-export" type="submit">导出 PDF 压缩包</button></div>
     </form>
   </dialog>
 
@@ -204,6 +228,6 @@
   </section>
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260822-8" defer></script>
+  <script src="/assets/app.js?v=20260822-9" defer></script>
 </body>
 </html>

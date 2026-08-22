@@ -56,6 +56,11 @@ def _subject_allowed(grade: int, subject_id: str, slot: str) -> bool:
     return True
 
 
+def subject_allowed(grade: int, subject_id: str, slot: str) -> bool:
+    """Public hard-rule check used by manual schedule edits."""
+    return slot in SLOT_META and _subject_allowed(grade, subject_id, slot)
+
+
 def _candidate_score(
     grade: int,
     subject_id: str,
@@ -381,6 +386,14 @@ def _build_warnings_and_quality(
         "unassigned_lessons": unassigned_lessons,
     }
     return warnings, quality
+
+
+def rebuild_schedule_analysis(
+    state: dict[str, Any], lessons: dict[str, dict[str, dict[str, Any]]]
+) -> tuple[list[str], dict[str, Any]]:
+    """Recalculate warnings and quality after a validated manual edit."""
+    _, base_warnings, _ = _validate_inputs(state)
+    return _build_warnings_and_quality(state, lessons, base_warnings)
 
 
 def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: int = 80) -> dict[str, Any]:
