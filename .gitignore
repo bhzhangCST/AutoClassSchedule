@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.codex_tmp/
+.env
+.env.*
+!.env.example
+data/app_state.json
+*.tmp
+tmp/pdfs/
+output/pdf/

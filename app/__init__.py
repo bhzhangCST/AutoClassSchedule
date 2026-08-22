@@ -1,0 +1,2 @@
+"""Lightweight course scheduling application."""
+

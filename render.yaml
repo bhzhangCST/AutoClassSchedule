@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: classassign-school-schedule
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: CLASSASSIGN_USERNAME
+        value: admin
+      - key: CLASSASSIGN_PASSWORD
+        sync: false
+      - key: CLASSASSIGN_SECRET
+        generateValue: true
+      - key: CLASSASSIGN_SECURE_COOKIE
+        value: "1"
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
+      - key: CLASSASSIGN_STATE_KEY
+        value: classassign:state:v1
