@@ -81,15 +81,32 @@ def _pdf_logo_bytes() -> bytes:
         return output.getvalue()
 
 
-def _page_header(value: str) -> Table:
+def _page_header(value: str, subtitle: str | None = None) -> Table:
     usable_width = PAGE_SIZE[0] - 2 * PAGE_MARGIN
+    title_width = usable_width - 52 * mm
     logo_width = 20 * mm
     logo_height = logo_width * 2480 / 3508
     logo = ReportLabImage(BytesIO(_pdf_logo_bytes()), width=logo_width, height=logo_height)
+    title_block: Any = _title(value)
+    header_height = 16 * mm
+    if subtitle:
+        title_block = Table(
+            [[_title(value)], [_paragraph(subtitle, size=10, leading=12)]],
+            colWidths=[title_width],
+        )
+        title_block.setStyle(TableStyle([
+            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ]))
+        header_height = 20 * mm
     header = Table(
-        [[logo, _title(value), ""]],
-        colWidths=[26 * mm, usable_width - 52 * mm, 26 * mm],
-        rowHeights=[16 * mm],
+        [[logo, title_block, ""]],
+        colWidths=[26 * mm, title_width, 26 * mm],
+        rowHeights=[header_height],
     )
     header.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
@@ -148,7 +165,7 @@ def _schedule_table(cell_value: Any, unavailable_slots: set[str] | None = None) 
     return table
 
 
-def _build_document(stories: list[tuple[str, Table]], *, title: str, author: str) -> BytesIO:
+def _build_document(stories: list[tuple[str, str | None, Table]], *, title: str, author: str) -> BytesIO:
     if not stories:
         raise ValueError("没有可导出的课表")
     output = BytesIO()
@@ -164,8 +181,8 @@ def _build_document(stories: list[tuple[str, Table]], *, title: str, author: str
         subject="课程表",
     )
     story: list[Any] = []
-    for index, (page_title, table) in enumerate(stories):
-        story.extend([_page_header(page_title), Spacer(1, 4 * mm), table])
+    for index, (page_title, page_subtitle, table) in enumerate(stories):
+        story.extend([_page_header(page_title, page_subtitle), Spacer(1, 4 * mm), table])
         if index < len(stories) - 1:
             story.append(PageBreak())
     document.build(story)
@@ -184,7 +201,7 @@ def build_class_schedule_pdf(state: dict[str, Any], grade: int | None = None) ->
     if not classes:
         raise ValueError("所选年级没有可导出的班级课表")
 
-    stories: list[tuple[str, Table]] = []
+    stories: list[tuple[str, str | None, Table]] = []
     for class_item in classes:
         class_grade = int(class_item["grade"])
         available_slots = set(slots_for_grade(class_grade))
@@ -202,6 +219,7 @@ def build_class_schedule_pdf(state: dict[str, Any], grade: int | None = None) ->
 
         stories.append((
             f"{school_name}{class_item['name']}课程表",
+            None,
             _schedule_table(class_cell, unavailable_slots=all_slots - available_slots),
         ))
     scope_name = f"{grade}年级" if grade else "全部年级"
@@ -234,5 +252,10 @@ def build_teacher_schedule_pdf(state: dict[str, Any], teacher_id: str) -> BytesI
         return _paragraph(f"{class_name}\n{subject['name']}", size=9, leading=13, bold=True)
 
     school_name = state.get("school_name", "")
-    page_title = f"{school_name}{teacher['name']}课程表"
-    return _build_document([(page_title, _schedule_table(teacher_cell))], title=page_title, author=school_name)
+    page_title = f"{school_name}教师课程表"
+    page_subtitle = f"教师：{teacher['name']}"
+    return _build_document(
+        [(page_title, page_subtitle, _schedule_table(teacher_cell))],
+        title=f"{page_title}-{teacher['name']}",
+        author=school_name,
+    )

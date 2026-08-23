@@ -10,6 +10,8 @@ let currentScheduleGrade = 1;
 let scheduleSwapDraft = null;
 let selectedSwapSlot = null;
 let pendingConfirm = null;
+let teacherAssignmentRanges = [];
+let nextTeacherAssignmentRangeId = 1;
 
 const pageNames = {
   overview: ["工作台", "工作概览"],
@@ -247,6 +249,139 @@ function renderTeacherHomeroomOptions(teacher = null) {
   select.value = teacher?.homeroom_class_id || "";
 }
 
+function teacherRangeClasses(grade) {
+  return appData.state.classes.filter((item) => Number(item.grade) === Number(grade));
+}
+
+function teacherRangeSubjects(grade) {
+  const curriculum = appData.meta.curriculum[String(grade)] || {};
+  const allowed = new Set(Object.keys(curriculum).filter((subjectId) => !["reading", "meeting"].includes(subjectId)));
+  return appData.meta.subjects.filter((subject) => allowed.has(subject.id));
+}
+
+function newTeacherRange(values = {}) {
+  const grade = Number(values.grade || appData.state.classes[0]?.grade || 1);
+  const classes = teacherRangeClasses(grade);
+  return {
+    id: `teacher-range-${nextTeacherAssignmentRangeId++}`,
+    grade,
+    start_class_id: values.start_class_id || classes[0]?.id || "",
+    end_class_id: values.end_class_id || values.start_class_id || classes[0]?.id || "",
+    subject_id: values.subject_id || "",
+  };
+}
+
+function teacherRangesFromState(teacherId) {
+  const ranges = [];
+  const grades = [...new Set(appData.state.classes.map((item) => Number(item.grade)))].sort((left, right) => left - right);
+  for (const grade of grades) {
+    const classes = teacherRangeClasses(grade);
+    for (const subject of teacherRangeSubjects(grade)) {
+      const assignedIndexes = classes
+        .map((classItem, index) => appData.state.assignments[classItem.id]?.[subject.id] === teacherId ? index : -1)
+        .filter((index) => index >= 0);
+      if (!assignedIndexes.length) continue;
+      let rangeStart = assignedIndexes[0];
+      let rangeEnd = assignedIndexes[0];
+      for (const current of [...assignedIndexes.slice(1), null]) {
+        if (current !== null && current === rangeEnd + 1) {
+          rangeEnd = current;
+          continue;
+        }
+        ranges.push(newTeacherRange({
+          grade,
+          start_class_id: classes[rangeStart].id,
+          end_class_id: classes[rangeEnd].id,
+          subject_id: subject.id,
+        }));
+        if (current !== null) rangeStart = rangeEnd = current;
+      }
+    }
+  }
+  return ranges;
+}
+
+function expandedTeacherAssignments() {
+  const expanded = {};
+  for (const range of teacherAssignmentRanges) {
+    if (!range.subject_id) continue;
+    const classes = teacherRangeClasses(range.grade);
+    const startIndex = classes.findIndex((item) => item.id === range.start_class_id);
+    const endIndex = classes.findIndex((item) => item.id === range.end_class_id);
+    if (startIndex < 0 || endIndex < startIndex) continue;
+    for (const classItem of classes.slice(startIndex, endIndex + 1)) {
+      if (!expanded[classItem.id]) expanded[classItem.id] = new Set();
+      expanded[classItem.id].add(range.subject_id);
+    }
+  }
+  return Object.fromEntries(
+    Object.entries(expanded).map(([classId, subjectIds]) => [classId, [...subjectIds]]),
+  );
+}
+
+function teacherAssignmentConflictCount(assignments, teacherId = "") {
+  return Object.entries(assignments).reduce((count, [classId, subjectIds]) => (
+    count + subjectIds.filter((subjectId) => {
+      const assignedTeacher = appData.state.assignments[classId]?.[subjectId];
+      return assignedTeacher && assignedTeacher !== teacherId;
+    }).length
+  ), 0);
+}
+
+function syncTeacherSubjectsFromRanges() {
+  const selectedSubjects = new Set(teacherAssignmentRanges.map((range) => range.subject_id).filter(Boolean));
+  document.querySelectorAll("#teacher-subject-options input").forEach((input) => {
+    if (selectedSubjects.has(input.value)) input.checked = true;
+  });
+}
+
+function updateTeacherRangeStatus() {
+  const status = document.getElementById("teacher-range-status");
+  const assignments = expandedTeacherAssignments();
+  const classCount = Object.keys(assignments).length;
+  const assignmentCount = Object.values(assignments).reduce((sum, subjectIds) => sum + subjectIds.length, 0);
+  const conflictCount = teacherAssignmentConflictCount(assignments, document.getElementById("teacher-id").value);
+  status.classList.toggle("warning", conflictCount > 0);
+  if (!assignmentCount) {
+    status.textContent = "尚未添加任课范围";
+  } else if (conflictCount) {
+    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课；其中 ${conflictCount} 项将替换原教师`;
+  } else {
+    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课`;
+  }
+}
+
+function renderTeacherAssignmentRanges() {
+  const container = document.getElementById("teacher-range-list");
+  if (!teacherAssignmentRanges.length) {
+    container.innerHTML = '<div class="teacher-range-empty">尚未配置任课班级。点击下方按钮，可按连续班级范围添加。</div>';
+    updateTeacherRangeStatus();
+    return;
+  }
+  const grades = [...new Set(appData.state.classes.map((item) => Number(item.grade)))].sort((left, right) => left - right);
+  container.innerHTML = teacherAssignmentRanges.map((range) => {
+    const classes = teacherRangeClasses(range.grade);
+    const subjects = teacherRangeSubjects(range.grade);
+    const startIndex = Math.max(0, classes.findIndex((item) => item.id === range.start_class_id));
+    const endIndex = Math.max(startIndex, classes.findIndex((item) => item.id === range.end_class_id));
+    range.start_class_id = classes[startIndex]?.id || "";
+    range.end_class_id = classes[endIndex]?.id || range.start_class_id;
+    if (!subjects.some((subject) => subject.id === range.subject_id)) range.subject_id = "";
+    const classOptions = (selectedId, minimumIndex = 0) => classes.map((classItem, index) => `
+      <option value="${classItem.id}" ${index < minimumIndex ? "disabled" : ""} ${classItem.id === selectedId ? "selected" : ""}>${escapeHtml(classItem.name)}</option>
+    `).join("");
+    return `<div class="teacher-range-row" data-teacher-range-id="${range.id}">
+      <label class="teacher-range-field"><span>年级</span><select data-teacher-range-field="grade">${grades.map((grade) => `<option value="${grade}" ${grade === range.grade ? "selected" : ""}>${gradeNames[grade]}</option>`).join("")}</select></label>
+      <label class="teacher-range-field"><span>起始班级</span><select data-teacher-range-field="start_class_id">${classOptions(range.start_class_id)}</select></label>
+      <label class="teacher-range-field"><span>结束班级</span><select data-teacher-range-field="end_class_id">${classOptions(range.end_class_id, startIndex)}</select></label>
+      <label class="teacher-range-field teacher-range-subject"><span>任教学科</span><select data-teacher-range-field="subject_id" required><option value="">选择科目</option>${subjects.map((subject) => `<option value="${subject.id}" ${subject.id === range.subject_id ? "selected" : ""}>${escapeHtml(subject.short)}</option>`).join("")}</select></label>
+      <button class="tiny-button danger teacher-range-remove" type="button" data-remove-teacher-range="${range.id}">移除</button>
+    </div>`;
+  }).join("");
+  syncTeacherSubjectsFromRanges();
+  updateTeacherRangeStatus();
+}
+
 function openTeacherDialog(teacherId = null) {
   const teacher = teacherId ? appData.state.teachers.find((item) => item.id === teacherId) : null;
   document.getElementById("teacher-dialog-title").textContent = teacher ? "编辑教师" : "添加教师";
@@ -255,13 +390,15 @@ function openTeacherDialog(teacherId = null) {
   document.getElementById("teacher-min-lessons").value = teacher?.min_weekly_lessons ?? 12;
   renderTeacherHomeroomOptions(teacher);
   renderTeacherSubjectOptions(teacher?.subject_ids || []);
+  teacherAssignmentRanges = teacher ? teacherRangesFromState(teacher.id) : [];
+  renderTeacherAssignmentRanges();
   document.getElementById("teacher-dialog").showModal();
   document.getElementById("teacher-name").focus();
 }
 
 async function deleteTeacher(teacherId) {
   const teacher = appData.state.teachers.find((item) => item.id === teacherId);
-  const confirmed = await confirmDialog("删除教师", `删除“${teacher?.name || "该教师"}”后，相关班级任课关系将变为未分配。`);
+  const confirmed = await confirmDialog("删除教师", `删除“${teacher?.name || "该教师"}”后，相关班级任课关系将变为未分配。`, "确认删除");
   if (!confirmed) return;
   try {
     const data = await api(`/api/teachers/${teacherId}`, { method: "DELETE" });
@@ -601,7 +738,7 @@ function undoScheduleSwap() {
 
 async function cancelScheduleEdit() {
   if (scheduleSwapDraft?.swaps.length) {
-    const confirmed = await confirmDialog("放弃课表调整", "尚未保存的课程交换将全部撤销。当前已保存课表不会改变。");
+    const confirmed = await confirmDialog("放弃课表调整", "尚未保存的课程交换将全部撤销。当前已保存课表不会改变。", "放弃调整");
     if (!confirmed) return;
   }
   scheduleSwapDraft = null;
@@ -657,7 +794,7 @@ function buildPrintTimetable() {
   const teachers = teacherMap();
   document.getElementById("print-title").textContent = scheduleMode === "class"
     ? `${appData.state.school_name}${classItem.name}课程表`
-    : `${appData.state.school_name}${teacher.name}课程表`;
+    : `${appData.state.school_name}教师课程表`;
   const printNote = document.getElementById("print-note");
   printNote.textContent = scheduleMode === "class" ? "" : `教师：${teacher.name}`;
   printNote.classList.toggle("hidden", scheduleMode === "class");
@@ -775,10 +912,11 @@ function renderRules() {
   document.getElementById("curriculum-table").innerHTML = `${header}<tbody>${body}</tbody>`;
 }
 
-function confirmDialog(title, message) {
+function confirmDialog(title, message, confirmLabel = "确认") {
   const dialog = document.getElementById("confirm-dialog");
   document.getElementById("confirm-title").textContent = title;
   document.getElementById("confirm-message").textContent = message;
+  document.getElementById("confirm-action").textContent = confirmLabel;
   dialog.returnValue = "cancel";
   dialog.showModal();
   return new Promise((resolve) => {
@@ -855,6 +993,40 @@ document.getElementById("import-teachers-button").addEventListener("click", () =
 document.getElementById("teacher-search").addEventListener("input", (event) => renderTeachers(event.target.value));
 document.getElementById("close-teacher-dialog").addEventListener("click", () => document.getElementById("teacher-dialog").close());
 document.getElementById("cancel-teacher-dialog").addEventListener("click", () => document.getElementById("teacher-dialog").close());
+document.getElementById("add-teacher-range").addEventListener("click", () => {
+  const range = newTeacherRange();
+  teacherAssignmentRanges.push(range);
+  renderTeacherAssignmentRanges();
+  document.querySelector(`[data-teacher-range-id="${range.id}"] [data-teacher-range-field="subject_id"]`)?.focus();
+});
+document.getElementById("teacher-range-list").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-teacher-range]");
+  if (!button) return;
+  teacherAssignmentRanges = teacherAssignmentRanges.filter((range) => range.id !== button.dataset.removeTeacherRange);
+  renderTeacherAssignmentRanges();
+});
+document.getElementById("teacher-range-list").addEventListener("change", (event) => {
+  const field = event.target.dataset.teacherRangeField;
+  const row = event.target.closest("[data-teacher-range-id]");
+  const range = teacherAssignmentRanges.find((item) => item.id === row?.dataset.teacherRangeId);
+  if (!field || !range) return;
+  if (field === "grade") {
+    range.grade = Number(event.target.value);
+    const classes = teacherRangeClasses(range.grade);
+    range.start_class_id = classes[0]?.id || "";
+    range.end_class_id = classes[0]?.id || "";
+    if (!teacherRangeSubjects(range.grade).some((subject) => subject.id === range.subject_id)) range.subject_id = "";
+  } else {
+    range[field] = event.target.value;
+    if (field === "start_class_id") {
+      const classes = teacherRangeClasses(range.grade);
+      const startIndex = classes.findIndex((item) => item.id === range.start_class_id);
+      const endIndex = classes.findIndex((item) => item.id === range.end_class_id);
+      if (endIndex < startIndex) range.end_class_id = range.start_class_id;
+    }
+  }
+  renderTeacherAssignmentRanges();
+});
 document.getElementById("close-teacher-import-dialog").addEventListener("click", () => document.getElementById("teacher-import-dialog").close());
 document.getElementById("cancel-teacher-import-dialog").addEventListener("click", () => document.getElementById("teacher-import-dialog").close());
 document.getElementById("teacher-import-form").addEventListener("submit", async (event) => {
@@ -883,19 +1055,33 @@ document.getElementById("teacher-import-form").addEventListener("submit", async 
 document.getElementById("teacher-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = document.getElementById("save-teacher-button");
-  setLoading(button, true, "保存中…");
   const teacherId = document.getElementById("teacher-id").value;
+  const teachingAssignments = expandedTeacherAssignments();
+  const conflictCount = teacherAssignmentConflictCount(teachingAssignments, teacherId);
+  if (conflictCount) {
+    const confirmed = await confirmDialog(
+      "替换已有任课教师",
+      `所选范围中有 ${conflictCount} 项课程已配置其他教师。保存后将由当前教师接替。`,
+      "确认替换",
+    );
+    if (!confirmed) return;
+  }
+  const rangeSubjectIds = Object.values(teachingAssignments).flat();
+  const selectedSubjectIds = [...document.querySelectorAll("#teacher-subject-options input:checked")].map((input) => input.value);
   const payload = {
     name: document.getElementById("teacher-name").value,
     min_weekly_lessons: Number(document.getElementById("teacher-min-lessons").value),
-    subject_ids: [...document.querySelectorAll("#teacher-subject-options input:checked")].map((input) => input.value),
+    subject_ids: [...new Set([...selectedSubjectIds, ...rangeSubjectIds])],
     homeroom_class_id: document.getElementById("teacher-homeroom-class").value || null,
+    teaching_assignments: teachingAssignments,
   };
+  setLoading(button, true, "保存中…");
   try {
     const data = await api(teacherId ? `/api/teachers/${teacherId}` : "/api/teachers", { method: teacherId ? "PUT" : "POST", body: JSON.stringify(payload) });
     document.getElementById("teacher-dialog").close();
     applyStateResponse(data);
-    showToast(teacherId ? "教师资料已更新" : "教师已添加");
+    const assignmentCount = Object.values(teachingAssignments).reduce((sum, subjectIds) => sum + subjectIds.length, 0);
+    showToast(`${teacherId ? "教师资料已更新" : "教师已添加"}${assignmentCount ? `，已配置 ${assignmentCount} 项任课` : ""}`);
   } catch (error) {
     showToast(error.message, "error");
   } finally {

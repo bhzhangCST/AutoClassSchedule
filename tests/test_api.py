@@ -110,6 +110,12 @@ def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
     first_class_sheet = class_workbook[class_workbook.sheetnames[0]]
     assert first_class_sheet["A1"].value == "高唐县民族实验小学三年级1班课程表"
     assert first_class_sheet.page_setup.orientation == "portrait"
+    assert first_class_sheet.page_setup.paperSize == 9
+    assert first_class_sheet.page_setup.fitToWidth == 1
+    assert first_class_sheet.page_setup.fitToHeight == 1
+    assert first_class_sheet.print_area == "'三年级1班'!$A$1:$G$9"
+    assert first_class_sheet.row_dimensions[3].height == 92
+    assert first_class_sheet.column_dimensions["C"].width == 16.5
     assert "A1:G1" in {str(item) for item in first_class_sheet.merged_cells.ranges}
     assert all(cell.fill.fill_type is None for row in first_class_sheet.iter_rows() for cell in row)
 
@@ -120,8 +126,9 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
 
     index_response = client.get("/")
     assert index_response.status_code == 200
-    assert "/assets/styles.css?v=20260822-9" in index_response.text
-    assert "/assets/app.js?v=20260822-9" in index_response.text
+    assert "/assets/styles.css?v=20260823-2" in index_response.text
+    assert "/assets/app.js?v=20260823-2" in index_response.text
+    assert '<span class="login-school-name">高唐县民族实验小学</span>' in index_response.text
     assert 'value="teacher">指定教师' in index_response.text
     assert "teacher-export-class" not in index_response.text
     assert "批量导出课表" in index_response.text
@@ -132,11 +139,91 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
     assert 'data-view="assignments"' not in index_response.text
     assert "教师与任课" in index_response.text
     assert '<img class="print-logo" src="/static/logo.jpg"' in index_response.text
+    assert 'id="add-teacher-range"' in index_response.text
+    assert 'id="teacher-range-list"' in index_response.text
     assert "no-store" in index_response.headers["cache-control"]
 
-    script_response = client.get("/assets/app.js?v=20260822-9")
+    script_response = client.get("/assets/app.js?v=20260823-2")
     assert script_response.status_code == 200
     assert "no-store" in script_response.headers["cache-control"]
+    assert "`${appData.state.school_name}教师课程表`" in script_response.text
+    assert "teaching_assignments: teachingAssignments" in script_response.text
+    assert "function teacherRangesFromState" in script_response.text
+
+    style_response = client.get("/assets/styles.css?v=20260823-2")
+    assert style_response.status_code == 200
+    assert ".login-school-name { white-space: nowrap; }" in style_response.text
+    assert ".teacher-range-row" in style_response.text
+    assert "no-store" in style_response.headers["cache-control"]
+
+
+def test_single_teacher_can_save_assignment_ranges_atomically(tmp_path, monkeypatch) -> None:
+    local_store = StateStore(tmp_path / "state.json")
+    monkeypatch.setattr(main, "store", local_store)
+    client = TestClient(main.app)
+    _login(client)
+
+    created = client.post(
+        "/api/teachers",
+        json={
+            "name": "范围任课教师",
+            "subject_ids": [],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": None,
+            "teaching_assignments": {
+                "g1c1": ["chinese", "math"],
+                "g1c2": ["chinese"],
+            },
+        },
+    )
+    assert created.status_code == 200, created.text
+    teacher = created.json()["state"]["teachers"][0]
+    teacher_id = teacher["id"]
+    assert set(teacher["subject_ids"]) == {"chinese", "math"}
+    created_assignments = created.json()["state"]["assignments"]
+    assert created_assignments["g1c1"]["chinese"] == teacher_id
+    assert created_assignments["g1c1"]["math"] == teacher_id
+    assert created_assignments["g1c1"]["reading"] == teacher_id
+    assert created_assignments["g1c2"]["chinese"] == teacher_id
+    assert created_assignments["g1c2"]["reading"] == teacher_id
+
+    updated = client.put(
+        f"/api/teachers/{teacher_id}",
+        json={
+            "name": "范围任课教师",
+            "subject_ids": [],
+            "min_weekly_lessons": 0,
+            "homeroom_class_id": None,
+            "teaching_assignments": {
+                "g1c2": ["math"],
+                "g1c3": ["pe"],
+            },
+        },
+    )
+    assert updated.status_code == 200, updated.text
+    updated_state = updated.json()["state"]
+    updated_teacher = next(item for item in updated_state["teachers"] if item["id"] == teacher_id)
+    assert set(updated_teacher["subject_ids"]) == {"math", "pe"}
+    assert updated_state["assignments"]["g1c1"]["chinese"] is None
+    assert updated_state["assignments"]["g1c1"]["math"] is None
+    assert updated_state["assignments"]["g1c1"]["reading"] is None
+    assert updated_state["assignments"]["g1c2"]["math"] == teacher_id
+    assert updated_state["assignments"]["g1c2"]["chinese"] is None
+    assert updated_state["assignments"]["g1c2"]["reading"] is None
+    assert updated_state["assignments"]["g1c3"]["pe"] == teacher_id
+
+    before_invalid = local_store.load()
+    invalid = client.put(
+        f"/api/teachers/{teacher_id}",
+        json={
+            "name": "不应保存的新名称",
+            "subject_ids": [],
+            "min_weekly_lessons": 0,
+            "teaching_assignments": {"g1c1": ["reading"]},
+        },
+    )
+    assert invalid.status_code == 422
+    assert local_store.load() == before_invalid
 
 
 def test_batch_assignments_are_saved_atomically(tmp_path, monkeypatch) -> None:
@@ -345,7 +432,9 @@ def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> N
     assert single_export.headers["content-disposition"].endswith(".pdf")
     single_pdf = PdfReader(BytesIO(single_export.content))
     assert len(single_pdf.pages) == 1
-    assert "高唐县民族实验小学三年级数学教师课程表" in (single_pdf.pages[0].extract_text() or "")
+    single_pdf_text = single_pdf.pages[0].extract_text() or ""
+    assert "高唐县民族实验小学教师课程表" in single_pdf_text
+    assert "教师：三年级数学教师" in single_pdf_text
     assert float(single_pdf.pages[0].mediabox.height) > float(single_pdf.pages[0].mediabox.width)
     assert _page_contains_image(single_pdf.pages[0])
 
@@ -359,8 +448,12 @@ def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> N
         teacher_workbook = load_workbook(BytesIO(exported_xlsx.content))
         assert teacher_workbook.sheetnames == ["三年级数学教师"]
         teacher_sheet = teacher_workbook.active
-        assert teacher_sheet["A1"].value == "高唐县民族实验小学三年级数学教师课程表"
+        assert teacher_sheet["A1"].value == "高唐县民族实验小学教师课程表"
+        assert teacher_sheet["A2"].value == "教师：三年级数学教师"
         assert teacher_sheet.page_setup.orientation == "portrait"
+        assert teacher_sheet.print_area == "'三年级数学教师'!$A$1:$G$10"
+        assert teacher_sheet.print_title_rows == "$1:$3"
+        assert teacher_sheet.row_dimensions[4].height == 92
         assert all(cell.fill.fill_type is None for row in teacher_sheet.iter_rows() for cell in row)
 
     assert client.get("/api/export/teachers.zip?grade=1").status_code == 409
@@ -438,7 +531,7 @@ def test_schedule_swaps_are_atomic_and_keep_teacher_views_consistent(tmp_path, m
     teacher_xlsx = client.get("/api/export/teachers.xlsx?teacher_id=t_manual")
     assert teacher_xlsx.status_code == 200
     teacher_sheet = load_workbook(BytesIO(teacher_xlsx.content)).active
-    assert str(teacher_sheet["G5"].value).startswith("三年级1班\n")
+    assert str(teacher_sheet["G6"].value).startswith("三年级1班\n")
 
 
 def test_upstash_store_initializes_and_persists(monkeypatch) -> None:

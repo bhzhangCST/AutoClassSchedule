@@ -7,7 +7,7 @@
   <meta name="description" content="高唐县民族实验小学课程安排与教师任课管理系统">
   <title>小学课程安排</title>
   <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260822-9">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260823-2">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -17,7 +17,10 @@
         <img class="login-logo" src="/static/logo.jpg" alt="高唐县民族实验小学标志">
       </div>
       <div class="login-form-pane">
-        <h1 class="login-title">高唐县民族实验小学课程安排系统</h1>
+        <h1 class="login-title">
+          <span class="login-school-name">高唐县民族实验小学</span>
+          <span class="login-system-name">课程安排系统</span>
+        </h1>
         <form id="login-form" class="stack-form" data-testid="login-form">
           <label>
             <span>管理员账号</span>
@@ -159,14 +162,20 @@
     </div>
   </div>
 
-  <dialog id="teacher-dialog" class="modal">
+  <dialog id="teacher-dialog" class="modal teacher-modal">
     <form method="dialog" id="teacher-form">
       <div class="modal-heading"><div><p class="eyebrow">教师资料</p><h3 id="teacher-dialog-title">添加教师</h3></div><button class="icon-button" id="close-teacher-dialog" type="button" aria-label="关闭">×</button></div>
       <input type="hidden" id="teacher-id">
       <label class="wide-field"><span>教师姓名</span><input id="teacher-name" maxlength="40" required></label>
       <label class="wide-field"><span>期望最低周课时</span><input id="teacher-min-lessons" type="number" min="0" max="35" value="12"><small>小课教师按至少12节检查；其他教师设为0可不检查</small></label>
       <label class="wide-field"><span>班主任班级</span><select id="teacher-homeroom-class"><option value="">不是班主任</option></select><small>每个班只能指定一名班主任；该班班队会将自动由此教师承担</small></label>
-      <fieldset><legend>可任课程</legend><div id="teacher-subject-options" class="subject-options"></div></fieldset>
+      <fieldset><legend>可任课程</legend><div id="teacher-subject-options" class="subject-options"></div><small>任课配置中选到的科目会自动勾选，也可以补充其他可任课程</small></fieldset>
+      <fieldset class="teacher-assignment-section">
+        <legend>任课班级与科目</legend>
+        <p class="modal-description">按年级选择连续的班级范围和任教学科；同一教师可添加多条范围。</p>
+        <div class="teacher-range-list" id="teacher-range-list"></div>
+        <div class="teacher-range-footer"><button class="outline-button" id="add-teacher-range" type="button">添加任课范围</button><span class="teacher-range-status" id="teacher-range-status">尚未添加任课范围</span></div>
+      </fieldset>
       <div class="modal-actions"><button class="ghost-button" id="cancel-teacher-dialog" type="button">取消</button><button class="primary-button" id="save-teacher-button" type="submit">保存教师</button></div>
     </form>
   </dialog>
@@ -228,6 +237,6 @@
   </section>
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260822-9" defer></script>
+  <script src="/assets/app.js?v=20260823-2" defer></script>
 </body>
 </html>

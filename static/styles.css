@@ -61,11 +61,14 @@ label span, .wide-field > span { display: block; margin-bottom: .5rem; color: #4
 .schedule-actions { align-items: flex-end; }
 
 .login-screen { position: fixed; z-index: var(--layer-modal); inset: 0; display: grid; min-height: 100dvh; place-items: center; padding: 2rem; overflow-y: auto; background: var(--canvas); }
-.login-card { display: grid; grid-template-columns: minmax(20rem, .9fr) minmax(22rem, 1.1fr); width: min(56rem, 100%); min-height: 33rem; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); }
+.login-card { display: grid; grid-template-columns: minmax(20rem, .8fr) minmax(30rem, 1.2fr); width: min(64rem, 100%); min-height: 33rem; overflow: hidden; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); }
 .login-brand-pane { display: grid; place-items: center; padding: clamp(2rem, 5vw, 3.5rem); border-right: 1px solid var(--line); background: var(--surface-muted); }
 .login-logo { display: block; width: min(16rem, 100%); height: auto; border: 0; background: #fff; object-fit: contain; }
-.login-form-pane { display: flex; flex-direction: column; justify-content: center; padding: clamp(2.25rem, 5vw, 4rem); }
-.login-title { max-width: 12em; margin: 0 0 2.25rem; font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; font-size: clamp(1.75rem, 3vw, 2.4rem); font-weight: 700; letter-spacing: -.035em; line-height: 1.25; text-wrap: balance; }
+.login-form-pane { display: flex; min-width: 0; flex-direction: column; justify-content: center; padding: clamp(2.25rem, 4vw, 3.5rem); }
+.login-title { margin: 0 0 2.25rem; font-family: "Songti SC", "STSong", "Noto Serif CJK SC", serif; font-size: clamp(1.7rem, 2.7vw, 2.25rem); font-weight: 700; letter-spacing: -.035em; line-height: 1.25; }
+.login-school-name, .login-system-name { display: block; }
+.login-school-name { white-space: nowrap; }
+.login-system-name { margin-top: .35rem; }
 .stack-form { display: grid; gap: 1.1rem; }
 .form-error { min-height: 1.125rem; margin: -.2rem 0 -.4rem; color: var(--danger); font-size: .8125rem; }
 
@@ -264,6 +267,8 @@ tbody tr:hover { background: #fafaf8; }
 .modal { width: min(37rem, calc(100vw - 2rem)); padding: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); color: var(--ink); background: var(--surface); box-shadow: 0 1.5rem 4rem rgba(41, 40, 37, .12); }
 .modal::backdrop { background: rgba(41,40,37,.38); backdrop-filter: blur(2px); }
 .modal form { padding: 1.6rem; }
+.teacher-modal { width: min(58rem, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); }
+.teacher-modal form { max-height: calc(100dvh - 2rem); overflow-y: auto; }
 .modal-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 1.4rem; }
 .modal-heading h3 { margin: 0; font-size: 1.15rem; }
 .icon-button { width: 2rem; height: 2rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: var(--surface-muted); font-size: 1.2rem; }
@@ -276,6 +281,20 @@ tbody tr:hover { background: #fafaf8; }
 .modal .wide-field { margin-bottom: 1rem; }
 .modal fieldset { margin: 1.1rem 0 0; padding: 0; border: 0; }
 .modal legend { margin-bottom: .7rem; color: #4f4d48; font-size: .8125rem; font-weight: 600; }
+.modal fieldset > small { display: block; margin-top: .55rem; color: var(--muted); font-size: .6875rem; line-height: 1.55; }
+.teacher-assignment-section { margin-top: 1.5rem !important; padding-top: 1.25rem !important; border-top: 1px solid var(--line) !important; }
+.teacher-assignment-section .modal-description { margin: -.2rem 0 .9rem; }
+.teacher-range-list { display: grid; gap: .55rem; }
+.teacher-range-row { display: grid; grid-template-columns: minmax(6.5rem, .7fr) minmax(8rem, 1fr) minmax(8rem, 1fr) minmax(8.5rem, 1.1fr) auto; align-items: end; gap: .55rem; padding: .75rem; border: 1px solid var(--line); border-radius: 8px; background: #fbfbfa; }
+.teacher-range-field { min-width: 0; }
+.teacher-range-field > span { margin-bottom: .3rem; color: var(--muted); font-size: .625rem; font-weight: 500; }
+.teacher-range-field select { width: 100%; height: 2.4rem; padding-right: 1.8rem; font-size: .75rem; }
+.teacher-range-remove { min-height: 2.4rem; align-self: end; }
+.teacher-range-empty { padding: 1.1rem; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--muted); background: #fbfbfa; font-size: .75rem; line-height: 1.6; text-align: center; }
+.teacher-range-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-top: .7rem; }
+.teacher-range-footer .outline-button { min-height: 2.25rem; padding: 0 .75rem; font-size: .75rem; }
+.teacher-range-status { color: var(--muted); font-size: .6875rem; line-height: 1.5; text-align: right; }
+.teacher-range-status.warning { color: var(--warning); font-weight: 600; }
 .export-format-field { margin-top: 1.15rem !important; }
 .export-format-options { display: grid; grid-template-columns: 1fr 1fr; gap: .55rem; }
 .export-format-options label { position: relative; }
@@ -317,6 +336,12 @@ tbody tr:hover { background: #fafaf8; }
   .assignment-grid { grid-template-columns: 1fr; }
 }
 
+@media (max-width: 60rem) and (min-width: 38.01rem) {
+  .login-card { grid-template-columns: minmax(16rem, .7fr) minmax(25rem, 1.3fr); }
+  .login-form-pane { padding: 2.25rem; }
+  .login-title { font-size: clamp(1.55rem, 3.1vw, 1.9rem); }
+}
+
 @media (max-width: 52rem) {
   .topbar-inner { position: relative; grid-template-columns: auto 1fr auto; width: min(100% - 2rem, var(--content-width)); }
   .menu-button { display: inline-flex; grid-column: 2; grid-row: 1; align-items: center; justify-self: end; }
@@ -339,15 +364,17 @@ tbody tr:hover { background: #fafaf8; }
   .schedule-edit-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .schedule-edit-actions .primary-button { grid-column: 1 / -1; }
   .rule-card { grid-column: 1 / -1; }
+  .teacher-range-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .teacher-range-remove { grid-column: 2; justify-self: end; }
 }
 
 @media (max-width: 38rem) {
   .login-screen { align-items: start; padding: 1rem; }
-  .login-card { grid-template-columns: 1fr; min-height: auto; }
+  .login-card { width: 100%; min-width: 0; grid-template-columns: minmax(0, 1fr); min-height: auto; }
   .login-brand-pane { min-height: 15rem; padding: 1.5rem; border-right: 0; border-bottom: 1px solid var(--line); }
   .login-logo { width: 11rem; }
   .login-form-pane { padding: 1.75rem; }
-  .login-title { margin-bottom: 1.75rem; font-size: 1.75rem; }
+  .login-title { margin-bottom: 1.75rem; font-size: clamp(1.35rem, 6.25vw, 1.55rem); }
   .sidebar-brand strong { font-size: .8125rem; }
   .app-logo { width: 2.2rem; height: 2.2rem; }
   .account-badge span:last-child { display: none; }
@@ -361,6 +388,10 @@ tbody tr:hover { background: #fafaf8; }
   .section-intro > button, .section-intro .button-row, .section-intro .button-row > * { width: 100%; }
   .assignment-selector-bar { grid-template-columns: 1fr; }
   .assignment-row { grid-template-columns: 1fr; }
+  .teacher-range-row { grid-template-columns: 1fr; }
+  .teacher-range-remove { grid-column: 1; justify-self: start; }
+  .teacher-range-footer { align-items: stretch; flex-direction: column; }
+  .teacher-range-status { text-align: left; }
   .generation-options { width: 100%; }
   .generation-options label { flex: 1; }
   .generation-options label input { width: 100%; }

@@ -16,6 +16,7 @@ THIN_SIDE = Side(style="thin", color="666666")
 MEDIUM_SIDE = Side(style="medium", color="333333")
 TABLE_BORDER = Border(left=THIN_SIDE, right=THIN_SIDE, top=THIN_SIDE, bottom=THIN_SIDE)
 TITLE_FONT = Font(name="Microsoft YaHei", size=18, bold=True, color="222222")
+SUBTITLE_FONT = Font(name="Microsoft YaHei", size=11, bold=False, color="333333")
 HEADER_FONT = Font(name="Microsoft YaHei", size=11, bold=True, color="222222")
 BODY_FONT = Font(name="SimSun", size=10, color="222222")
 
@@ -45,57 +46,73 @@ def _configure_sheet(
     title: str,
     cell_value: Callable[[str], str],
     unavailable_slots: set[str] | None = None,
+    subtitle: str | None = None,
 ) -> None:
     unavailable_slots = unavailable_slots or set()
+    header_row = 3 if subtitle else 2
+    first_period_row = header_row + 1
+    last_period_row = first_period_row + len(PERIODS) - 1
     sheet.sheet_view.showGridLines = False
-    sheet.freeze_panes = "C3"
+    sheet.freeze_panes = f"C{first_period_row}"
     sheet.merge_cells("A1:G1")
     sheet["A1"] = title
     sheet["A1"].font = TITLE_FONT
     sheet["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    sheet.row_dimensions[1].height = 34
+    sheet.row_dimensions[1].height = 42
+
+    if subtitle:
+        sheet.merge_cells("A2:G2")
+        sheet["A2"] = subtitle
+        sheet["A2"].font = SUBTITLE_FONT
+        sheet["A2"].alignment = Alignment(horizontal="center", vertical="center")
+        sheet.row_dimensions[2].height = 22
 
     headers = ["时段", "节次", *[day["name"] for day in DAYS]]
     for column, value in enumerate(headers, start=1):
-        cell = sheet.cell(2, column, value)
+        cell = sheet.cell(header_row, column, value)
         cell.font = HEADER_FONT
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = Border(left=THIN_SIDE, right=THIN_SIDE, top=MEDIUM_SIDE, bottom=THIN_SIDE)
-    sheet.row_dimensions[2].height = 25
+    sheet.row_dimensions[header_row].height = 28
 
-    for period_index, period in enumerate(PERIODS, start=3):
-        sheet.cell(period_index, 1, period["section"] if period_index in (3, 7) else "")
-        sheet.cell(period_index, 2, f"第{period['order']}节")
+    for period_offset, period in enumerate(PERIODS):
+        period_row = first_period_row + period_offset
+        sheet.cell(period_row, 1, period["section"] if period_offset in (0, 4) else "")
+        sheet.cell(period_row, 2, f"第{period['order']}节")
         for day_index, day in enumerate(DAYS, start=3):
             slot = f"{day['id']}-{period['id']}"
-            sheet.cell(period_index, day_index, "—" if slot in unavailable_slots else cell_value(slot))
+            sheet.cell(period_row, day_index, "—" if slot in unavailable_slots else cell_value(slot))
         for column in range(1, 8):
-            cell = sheet.cell(period_index, column)
+            cell = sheet.cell(period_row, column)
             cell.font = BODY_FONT
             cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
             cell.border = TABLE_BORDER
-        sheet.row_dimensions[period_index].height = 54
+        sheet.row_dimensions[period_row].height = 92
 
-    sheet.merge_cells("A3:A6")
-    sheet.merge_cells("A7:A9")
-    sheet["A3"] = "上午"
-    sheet["A7"] = "下午"
-    for cell_ref in ("A3", "A7"):
+    morning_cell = f"A{first_period_row}"
+    afternoon_cell = f"A{first_period_row + 4}"
+    sheet.merge_cells(start_row=first_period_row, start_column=1, end_row=first_period_row + 3, end_column=1)
+    sheet.merge_cells(start_row=first_period_row + 4, start_column=1, end_row=last_period_row, end_column=1)
+    sheet[morning_cell] = "上午"
+    sheet[afternoon_cell] = "下午"
+    for cell_ref in (morning_cell, afternoon_cell):
         sheet[cell_ref].font = HEADER_FONT
         sheet[cell_ref].alignment = Alignment(horizontal="center", vertical="center")
 
-    widths = {"A": 9, "B": 11, "C": 20, "D": 20, "E": 20, "F": 20, "G": 20}
+    widths = {"A": 7.5, "B": 9, "C": 16.5, "D": 16.5, "E": 16.5, "F": 16.5, "G": 16.5}
     for column, width in widths.items():
         sheet.column_dimensions[column].width = width
 
-    sheet.print_area = "A1:G9"
-    sheet.print_title_rows = "1:2"
+    sheet.print_area = f"A1:G{last_period_row}"
+    sheet.print_title_rows = f"1:{header_row}"
     sheet.page_setup.orientation = sheet.ORIENTATION_PORTRAIT
     sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
     sheet.page_setup.fitToWidth = 1
     sheet.page_setup.fitToHeight = 1
     sheet.sheet_properties.pageSetUpPr.fitToPage = True
-    sheet.page_margins = PageMargins(left=0.25, right=0.25, top=0.35, bottom=0.3, header=0.1, footer=0.1)
+    sheet.print_options.horizontalCentered = True
+    sheet.print_options.verticalCentered = True
+    sheet.page_margins = PageMargins(left=0.2, right=0.2, top=0.2, bottom=0.2, header=0.1, footer=0.1)
     sheet.sheet_properties.outlinePr.summaryBelow = False
     sheet.auto_filter.ref = None
 
@@ -208,7 +225,12 @@ def build_teacher_schedules_xlsx(
             subject = SUBJECT_BY_ID.get(lesson.get("subject_id"), {"name": lesson.get("subject_id", "")})
             return f"{class_name}\n{subject['name']}"
 
-        _configure_sheet(sheet, f"{school_name}{teacher['name']}课程表", teacher_cell)
+        _configure_sheet(
+            sheet,
+            f"{school_name}教师课程表",
+            teacher_cell,
+            subtitle=f"教师：{teacher['name']}",
+        )
 
     if not workbook.worksheets:
         raise ValueError("所选范围内没有已排课教师")

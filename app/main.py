@@ -78,6 +78,7 @@ class TeacherPayload(BaseModel):
     subject_ids: list[str] = Field(default_factory=list)
     min_weekly_lessons: int = Field(default=12, ge=0, le=35)
     homeroom_class_id: str | None = Field(default=None, max_length=40)
+    teaching_assignments: dict[str, list[str]] | None = None
 
 
 class AssignmentPayload(BaseModel):
@@ -216,19 +217,95 @@ def _validate_homeroom_class_id(
     return class_id
 
 
+def _validate_teaching_assignments(
+    state: dict[str, Any],
+    teaching_assignments: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    if len(teaching_assignments) > 120:
+        raise HTTPException(status_code=422, detail="一次最多配置120个班级")
+    classes = {item["id"]: item for item in state["classes"]}
+    normalized: dict[str, list[str]] = {}
+    total = 0
+    for class_id, subject_ids in teaching_assignments.items():
+        class_item = classes.get(class_id)
+        if not class_item:
+            raise HTTPException(status_code=422, detail="任课班级不存在")
+        unique_subjects = list(dict.fromkeys(subject_ids))
+        total += len(unique_subjects)
+        if total > 1000:
+            raise HTTPException(status_code=422, detail="一次最多配置1000项任课关系")
+        allowed_subjects = set(CURRICULUM[int(class_item["grade"])])
+        invalid = [subject_id for subject_id in unique_subjects if subject_id not in allowed_subjects]
+        if invalid:
+            raise HTTPException(status_code=422, detail=f"{class_item['name']}没有课程：{', '.join(invalid)}")
+        automatic = [subject_id for subject_id in unique_subjects if subject_id in {"reading", "meeting"}]
+        if automatic:
+            raise HTTPException(status_code=422, detail="阅读和班队会由语文教师、班主任自动设置")
+        if unique_subjects:
+            normalized[class_id] = unique_subjects
+    return normalized
+
+
+def _merge_teacher_subject_ids(
+    subject_ids: list[str],
+    teaching_assignments: dict[str, list[str]] | None,
+) -> list[str]:
+    selected = set(subject_ids)
+    if teaching_assignments is not None:
+        selected.update(
+            subject_id
+            for class_subjects in teaching_assignments.values()
+            for subject_id in class_subjects
+        )
+    return [subject["id"] for subject in SUBJECTS if subject["id"] in selected]
+
+
+def _apply_teacher_assignments(
+    state: dict[str, Any],
+    teacher_id: str,
+    teaching_assignments: dict[str, list[str]],
+) -> None:
+    selected = {
+        (class_id, subject_id)
+        for class_id, subject_ids in teaching_assignments.items()
+        for subject_id in subject_ids
+    }
+    for class_id, class_assignments in state["assignments"].items():
+        for subject_id, assigned_teacher in class_assignments.items():
+            if (
+                assigned_teacher == teacher_id
+                and subject_id not in {"reading", "meeting"}
+                and (class_id, subject_id) not in selected
+            ):
+                class_assignments[subject_id] = None
+    for class_id, subject_ids in teaching_assignments.items():
+        class_assignments = state["assignments"].setdefault(class_id, {})
+        for subject_id in subject_ids:
+            class_assignments[subject_id] = teacher_id
+
+
 @app.post("/api/teachers")
 def create_teacher(payload: TeacherPayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     state = store.load()
     if any(item["name"] == payload.name.strip() for item in state["teachers"]):
         raise HTTPException(status_code=409, detail="教师姓名已存在")
     homeroom_class_id = _validate_homeroom_class_id(state, payload.homeroom_class_id)
+    subject_ids = _validate_subject_ids(payload.subject_ids)
+    teaching_assignments = (
+        _validate_teaching_assignments(state, payload.teaching_assignments)
+        if payload.teaching_assignments is not None
+        else None
+    )
+    teacher_id = f"t_{uuid.uuid4().hex[:10]}"
     state["teachers"].append({
-        "id": f"t_{uuid.uuid4().hex[:10]}",
+        "id": teacher_id,
         "name": payload.name.strip(),
-        "subject_ids": _validate_subject_ids(payload.subject_ids),
+        "subject_ids": _merge_teacher_subject_ids(subject_ids, teaching_assignments),
         "min_weekly_lessons": payload.min_weekly_lessons,
         "homeroom_class_id": homeroom_class_id,
     })
+    if teaching_assignments is not None:
+        _apply_teacher_assignments(state, teacher_id, teaching_assignments)
     apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
@@ -277,12 +354,20 @@ def update_teacher(teacher_id: str, payload: TeacherPayload, _: dict[str, Any] =
         raise HTTPException(status_code=404, detail="教师不存在")
     if any(item["id"] != teacher_id and item["name"] == payload.name.strip() for item in state["teachers"]):
         raise HTTPException(status_code=409, detail="教师姓名已存在")
+    subject_ids = _validate_subject_ids(payload.subject_ids)
+    teaching_assignments = (
+        _validate_teaching_assignments(state, payload.teaching_assignments)
+        if payload.teaching_assignments is not None
+        else None
+    )
     target.update({
         "name": payload.name.strip(),
-        "subject_ids": _validate_subject_ids(payload.subject_ids),
+        "subject_ids": _merge_teacher_subject_ids(subject_ids, teaching_assignments),
         "min_weekly_lessons": payload.min_weekly_lessons,
         "homeroom_class_id": _validate_homeroom_class_id(state, payload.homeroom_class_id, teacher_id),
     })
+    if teaching_assignments is not None:
+        _apply_teacher_assignments(state, teacher_id, teaching_assignments)
     apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
