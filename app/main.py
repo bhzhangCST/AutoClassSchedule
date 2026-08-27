@@ -31,6 +31,12 @@ from .schedule_edit import ScheduleSwapError, apply_schedule_swaps
 from .scheduler import generate_schedule
 from .store import PROJECT_ROOT, StorageError, store
 from .teacher_import import merge_teacher_rows, parse_teacher_workbook
+from .teaching_allocations import (
+    allocation_teacher_ids,
+    allocation_total,
+    normalize_allocations,
+    remove_teacher,
+)
 from .xlsx_export import XLSX_MEDIA_TYPE, build_class_schedule_xlsx, build_teacher_schedules_xlsx
 
 STATIC_DIR = PROJECT_ROOT / "static"
@@ -73,20 +79,29 @@ class ClassPayload(BaseModel):
     name: str = Field(min_length=1, max_length=40)
 
 
+class TeacherSharePayload(BaseModel):
+    lessons: int = Field(ge=1, le=35)
+
+
+class AssignmentAllocationPayload(BaseModel):
+    teacher_id: str = Field(min_length=1, max_length=80)
+    lessons: int = Field(ge=1, le=35)
+
+
 class TeacherPayload(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     subject_ids: list[str] = Field(default_factory=list)
     min_weekly_lessons: int = Field(default=12, ge=0, le=35)
     homeroom_class_id: str | None = Field(default=None, max_length=40)
-    teaching_assignments: dict[str, list[str]] | None = None
+    teaching_assignments: dict[str, dict[str, TeacherSharePayload] | list[str]] | None = None
 
 
 class AssignmentPayload(BaseModel):
-    assignments: dict[str, str | None]
+    assignments: dict[str, list[AssignmentAllocationPayload] | str | None]
 
 
 class AssignmentBatchPayload(BaseModel):
-    classes: dict[str, dict[str, str | None]]
+    classes: dict[str, dict[str, list[AssignmentAllocationPayload] | str | None]]
 
 
 class GeneratePayload(BaseModel):
@@ -219,36 +234,57 @@ def _validate_homeroom_class_id(
 
 def _validate_teaching_assignments(
     state: dict[str, Any],
-    teaching_assignments: dict[str, list[str]],
-) -> dict[str, list[str]]:
+    teaching_assignments: dict[str, dict[str, TeacherSharePayload] | list[str]],
+) -> dict[str, dict[str, dict[str, Any]]]:
     if len(teaching_assignments) > 120:
         raise HTTPException(status_code=422, detail="一次最多配置120个班级")
     classes = {item["id"]: item for item in state["classes"]}
-    normalized: dict[str, list[str]] = {}
+    normalized: dict[str, dict[str, dict[str, Any]]] = {}
     total = 0
-    for class_id, subject_ids in teaching_assignments.items():
+    for class_id, subject_values in teaching_assignments.items():
         class_item = classes.get(class_id)
         if not class_item:
             raise HTTPException(status_code=422, detail="任课班级不存在")
-        unique_subjects = list(dict.fromkeys(subject_ids))
+        grade = int(class_item["grade"])
+        if isinstance(subject_values, list):
+            subject_map = {
+                subject_id: {"lessons": CURRICULUM[grade].get(subject_id, 0)}
+                for subject_id in dict.fromkeys(subject_values)
+            }
+        else:
+            subject_map = {
+                subject_id: (
+                    value.model_dump() if isinstance(value, TeacherSharePayload) else dict(value)
+                )
+                for subject_id, value in subject_values.items()
+            }
+        unique_subjects = list(subject_map)
         total += len(unique_subjects)
         if total > 1000:
             raise HTTPException(status_code=422, detail="一次最多配置1000项任课关系")
-        allowed_subjects = set(CURRICULUM[int(class_item["grade"])])
+        allowed_subjects = set(CURRICULUM[grade])
         invalid = [subject_id for subject_id in unique_subjects if subject_id not in allowed_subjects]
         if invalid:
             raise HTTPException(status_code=422, detail=f"{class_item['name']}没有课程：{', '.join(invalid)}")
         automatic = [subject_id for subject_id in unique_subjects if subject_id in {"reading", "meeting"}]
         if automatic:
             raise HTTPException(status_code=422, detail="阅读和班队会由语文教师、班主任自动设置")
-        if unique_subjects:
-            normalized[class_id] = unique_subjects
+        for subject_id, share in subject_map.items():
+            lessons = int(share.get("lessons", 0))
+            if not 1 <= lessons <= CURRICULUM[grade][subject_id]:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{class_item['name']}的{next(item['name'] for item in SUBJECTS if item['id'] == subject_id)}课时应为1—{CURRICULUM[grade][subject_id]}节",
+                )
+            share["lessons"] = lessons
+        if subject_map:
+            normalized[class_id] = subject_map
     return normalized
 
 
 def _merge_teacher_subject_ids(
     subject_ids: list[str],
-    teaching_assignments: dict[str, list[str]] | None,
+    teaching_assignments: dict[str, dict[str, dict[str, Any]]] | None,
 ) -> list[str]:
     selected = set(subject_ids)
     if teaching_assignments is not None:
@@ -263,25 +299,45 @@ def _merge_teacher_subject_ids(
 def _apply_teacher_assignments(
     state: dict[str, Any],
     teacher_id: str,
-    teaching_assignments: dict[str, list[str]],
+    teaching_assignments: dict[str, dict[str, dict[str, Any]]],
 ) -> None:
     selected = {
         (class_id, subject_id)
-        for class_id, subject_ids in teaching_assignments.items()
-        for subject_id in subject_ids
+        for class_id, subject_map in teaching_assignments.items()
+        for subject_id in subject_map
     }
     for class_id, class_assignments in state["assignments"].items():
-        for subject_id, assigned_teacher in class_assignments.items():
+        class_item = next(item for item in state["classes"] if item["id"] == class_id)
+        for subject_id, assigned_value in class_assignments.items():
             if (
-                assigned_teacher == teacher_id
+                teacher_id in allocation_teacher_ids(assigned_value)
                 and subject_id not in {"reading", "meeting"}
                 and (class_id, subject_id) not in selected
             ):
-                class_assignments[subject_id] = None
-    for class_id, subject_ids in teaching_assignments.items():
+                class_assignments[subject_id] = remove_teacher(
+                    assigned_value, teacher_id, CURRICULUM[int(class_item["grade"])][subject_id]
+                )
+    for class_id, subject_map in teaching_assignments.items():
+        class_item = next(item for item in state["classes"] if item["id"] == class_id)
+        grade = int(class_item["grade"])
         class_assignments = state["assignments"].setdefault(class_id, {})
-        for subject_id in subject_ids:
-            class_assignments[subject_id] = teacher_id
+        for subject_id, share in subject_map.items():
+            allocations = remove_teacher(
+                class_assignments.get(subject_id), teacher_id, CURRICULUM[grade][subject_id]
+            )
+            allocations.append({
+                "teacher_id": teacher_id,
+                "lessons": int(share["lessons"]),
+            })
+            normalized = normalize_allocations(allocations, CURRICULUM[grade][subject_id])
+            assigned = allocation_total(normalized)
+            if assigned > CURRICULUM[grade][subject_id]:
+                subject_name = next(item["name"] for item in SUBJECTS if item["id"] == subject_id)
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{class_item['name']}的{subject_name}合计{assigned}节，超过标准{CURRICULUM[grade][subject_id]}节",
+                )
+            class_assignments[subject_id] = normalized
 
 
 @app.post("/api/teachers")
@@ -326,6 +382,7 @@ def download_teacher_import_template(_: dict[str, Any] = Depends(require_auth)) 
 @app.post("/api/teachers/import")
 async def import_teachers(
     file: UploadFile = File(...),
+    allow_incomplete: bool = Query(default=False),
     _: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     if not file.filename or Path(file.filename).suffix.lower() != ".xlsx":
@@ -342,6 +399,12 @@ async def import_teachers(
         summary = merge_teacher_rows(state, rows)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if summary.get("shortages") and not allow_incomplete:
+        return {
+            "requires_confirmation": True,
+            "shortages": summary["shortages"],
+            "import": summary,
+        }
     store.save(state)
     return {"import": summary, **_state_response()}
 
@@ -381,10 +444,12 @@ def delete_teacher(teacher_id: str, _: dict[str, Any] = Depends(require_auth)) -
     state["teachers"] = [item for item in state["teachers"] if item["id"] != teacher_id]
     if len(state["teachers"]) == before:
         raise HTTPException(status_code=404, detail="教师不存在")
-    for class_assignments in state["assignments"].values():
-        for subject_id, assigned_teacher in class_assignments.items():
-            if assigned_teacher == teacher_id:
-                class_assignments[subject_id] = None
+    classes_by_id = {item["id"]: item for item in state["classes"]}
+    for class_id, class_assignments in state["assignments"].items():
+        for subject_id, assigned_value in class_assignments.items():
+            class_assignments[subject_id] = remove_teacher(
+                assigned_value, teacher_id, CURRICULUM[int(classes_by_id[class_id]["grade"])][subject_id]
+            )
     apply_required_teacher_assignments(state)
     state["schedule"] = None
     store.save(state)
@@ -394,21 +459,46 @@ def delete_teacher(teacher_id: str, _: dict[str, Any] = Depends(require_auth)) -
 def _normalized_class_assignments(
     state: dict[str, Any],
     class_id: str,
-    assignments: dict[str, str | None],
-) -> dict[str, str | None]:
+    assignments: dict[str, list[AssignmentAllocationPayload] | str | None],
+) -> dict[str, list[dict[str, Any]]]:
     class_item = next((item for item in state["classes"] if item["id"] == class_id), None)
     if not class_item:
         raise HTTPException(status_code=404, detail="班级不存在")
     teacher_ids = {teacher["id"] for teacher in state["teachers"]}
     allowed_subjects = set(CURRICULUM[int(class_item["grade"])])
     normalized = dict(state["assignments"].get(class_id, {}))
-    for subject_id, teacher_id in assignments.items():
+    for subject_id, raw_value in assignments.items():
         if subject_id not in allowed_subjects:
             raise HTTPException(status_code=422, detail="该年级没有此课程")
-        if teacher_id and teacher_id not in teacher_ids:
+        if isinstance(raw_value, str):
+            raw_allocations: Any = raw_value
+        elif raw_value is None:
+            raw_allocations = []
+        else:
+            raw_allocations = [
+                item.model_dump() if isinstance(item, AssignmentAllocationPayload) else dict(item)
+                for item in raw_value
+            ]
+        subject_allocations = normalize_allocations(
+            raw_allocations, CURRICULUM[int(class_item["grade"])][subject_id]
+        )
+        missing_teachers = allocation_teacher_ids(subject_allocations) - teacher_ids
+        if missing_teachers:
             raise HTTPException(status_code=422, detail="教师不存在")
-        normalized[subject_id] = teacher_id or None
-    return {subject_id: normalized.get(subject_id) for subject_id in allowed_subjects}
+        assigned = allocation_total(subject_allocations)
+        expected = CURRICULUM[int(class_item["grade"])][subject_id]
+        if assigned > expected:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{class_item['name']}该课程合计{assigned}节，超过标准{expected}节",
+            )
+        normalized[subject_id] = subject_allocations
+    return {
+        subject_id: normalize_allocations(
+            normalized.get(subject_id), CURRICULUM[int(class_item["grade"])][subject_id]
+        )
+        for subject_id in allowed_subjects
+    }
 
 
 @app.put("/api/assignments")

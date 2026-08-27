@@ -18,6 +18,14 @@ from app import main
 from app.store import StateStore, StorageError, UpstashStateStore
 
 
+def _allocation_teacher_ids(value: list[dict]) -> list[str]:
+    return [item["teacher_id"] for item in value]
+
+
+def _first_teacher_id(value: list[dict]) -> str | None:
+    return value[0]["teacher_id"] if value else None
+
+
 def _login(client: TestClient) -> None:
     response = client.post("/api/auth/login", json={"username": "test-admin", "password": "test-password-only"})
     assert response.status_code == 200
@@ -126,8 +134,8 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
 
     index_response = client.get("/")
     assert index_response.status_code == 200
-    assert "/assets/styles.css?v=20260823-2" in index_response.text
-    assert "/assets/app.js?v=20260823-2" in index_response.text
+    assert "/assets/styles.css?v=20260827-1" in index_response.text
+    assert "/assets/app.js?v=20260827-1" in index_response.text
     assert '<span class="login-school-name">高唐县民族实验小学</span>' in index_response.text
     assert 'value="teacher">指定教师' in index_response.text
     assert "teacher-export-class" not in index_response.text
@@ -141,16 +149,19 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
     assert '<img class="print-logo" src="/static/logo.jpg"' in index_response.text
     assert 'id="add-teacher-range"' in index_response.text
     assert 'id="teacher-range-list"' in index_response.text
+    assert "主授" not in index_response.text
     assert "no-store" in index_response.headers["cache-control"]
 
-    script_response = client.get("/assets/app.js?v=20260823-2")
+    script_response = client.get("/assets/app.js?v=20260827-1")
     assert script_response.status_code == 200
     assert "no-store" in script_response.headers["cache-control"]
     assert "`${appData.state.school_name}教师课程表`" in script_response.text
     assert "teaching_assignments: teachingAssignments" in script_response.text
     assert "function teacherRangesFromState" in script_response.text
+    assert "主授" not in script_response.text
+    assert "data-assignment-primary" not in script_response.text
 
-    style_response = client.get("/assets/styles.css?v=20260823-2")
+    style_response = client.get("/assets/styles.css?v=20260827-1")
     assert style_response.status_code == 200
     assert ".login-school-name { white-space: nowrap; }" in style_response.text
     assert ".teacher-range-row" in style_response.text
@@ -181,11 +192,11 @@ def test_single_teacher_can_save_assignment_ranges_atomically(tmp_path, monkeypa
     teacher_id = teacher["id"]
     assert set(teacher["subject_ids"]) == {"chinese", "math"}
     created_assignments = created.json()["state"]["assignments"]
-    assert created_assignments["g1c1"]["chinese"] == teacher_id
-    assert created_assignments["g1c1"]["math"] == teacher_id
-    assert created_assignments["g1c1"]["reading"] == teacher_id
-    assert created_assignments["g1c2"]["chinese"] == teacher_id
-    assert created_assignments["g1c2"]["reading"] == teacher_id
+    assert _first_teacher_id(created_assignments["g1c1"]["chinese"]) == teacher_id
+    assert _first_teacher_id(created_assignments["g1c1"]["math"]) == teacher_id
+    assert _first_teacher_id(created_assignments["g1c1"]["reading"]) == teacher_id
+    assert _first_teacher_id(created_assignments["g1c2"]["chinese"]) == teacher_id
+    assert _first_teacher_id(created_assignments["g1c2"]["reading"]) == teacher_id
 
     updated = client.put(
         f"/api/teachers/{teacher_id}",
@@ -204,13 +215,13 @@ def test_single_teacher_can_save_assignment_ranges_atomically(tmp_path, monkeypa
     updated_state = updated.json()["state"]
     updated_teacher = next(item for item in updated_state["teachers"] if item["id"] == teacher_id)
     assert set(updated_teacher["subject_ids"]) == {"math", "pe"}
-    assert updated_state["assignments"]["g1c1"]["chinese"] is None
-    assert updated_state["assignments"]["g1c1"]["math"] is None
-    assert updated_state["assignments"]["g1c1"]["reading"] is None
-    assert updated_state["assignments"]["g1c2"]["math"] == teacher_id
-    assert updated_state["assignments"]["g1c2"]["chinese"] is None
-    assert updated_state["assignments"]["g1c2"]["reading"] is None
-    assert updated_state["assignments"]["g1c3"]["pe"] == teacher_id
+    assert updated_state["assignments"]["g1c1"]["chinese"] == []
+    assert updated_state["assignments"]["g1c1"]["math"] == []
+    assert updated_state["assignments"]["g1c1"]["reading"] == []
+    assert _first_teacher_id(updated_state["assignments"]["g1c2"]["math"]) == teacher_id
+    assert updated_state["assignments"]["g1c2"]["chinese"] == []
+    assert updated_state["assignments"]["g1c2"]["reading"] == []
+    assert _first_teacher_id(updated_state["assignments"]["g1c3"]["pe"]) == teacher_id
 
     before_invalid = local_store.load()
     invalid = client.put(
@@ -250,8 +261,8 @@ def test_batch_assignments_are_saved_atomically(tmp_path, monkeypatch) -> None:
     )
     assert saved.status_code == 200
     assert saved.json()["updated_classes"] == 2
-    assert saved.json()["state"]["assignments"][first_class["id"]]["math"] == teacher_id
-    assert saved.json()["state"]["assignments"][second_class["id"]]["math"] == teacher_id
+    assert _first_teacher_id(saved.json()["state"]["assignments"][first_class["id"]]["math"]) == teacher_id
+    assert _first_teacher_id(saved.json()["state"]["assignments"][second_class["id"]]["math"]) == teacher_id
 
     rejected = client.put(
         "/api/assignments",
@@ -264,7 +275,7 @@ def test_batch_assignments_are_saved_atomically(tmp_path, monkeypatch) -> None:
     )
     assert rejected.status_code == 404
     unchanged = client.get("/api/state").json()["state"]
-    assert unchanged["assignments"][first_class["id"]]["math"] == teacher_id
+    assert _first_teacher_id(unchanged["assignments"][first_class["id"]]["math"]) == teacher_id
 
 
 def test_homeroom_and_chinese_teacher_drive_fixed_courses(tmp_path, monkeypatch) -> None:
@@ -283,11 +294,11 @@ def test_homeroom_and_chinese_teacher_drive_fixed_courses(tmp_path, monkeypatch)
     )
     assert created.status_code == 200
     teacher_id = created.json()["state"]["teachers"][0]["id"]
-    assert created.json()["state"]["assignments"]["g1c1"]["meeting"] == teacher_id
+    assert _first_teacher_id(created.json()["state"]["assignments"]["g1c1"]["meeting"]) == teacher_id
 
     assigned = client.put("/api/assignments/g1c1", json={"assignments": {"chinese": teacher_id}})
     assert assigned.status_code == 200
-    assert assigned.json()["state"]["assignments"]["g1c1"]["reading"] == teacher_id
+    assert _first_teacher_id(assigned.json()["state"]["assignments"]["g1c1"]["reading"]) == teacher_id
 
     conflict = client.post(
         "/api/teachers",
@@ -311,11 +322,11 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     template_workbook = load_workbook(BytesIO(template.content))
     assert template_workbook.sheetnames == ["教师名单", "填写说明"]
     assert [template_workbook["教师名单"].cell(1, column).value for column in range(1, 6)] == [
-        "教师姓名\n（必填）",
-        "期望最低周课时\n（0—35整数，0表示不检查）",
+        "教师姓名\n（同名行合并）",
+        "期望最低周课时\n（0—35整数；同名行相加）",
         "是否班主任\n（填“是”或“否”）",
         "班主任班级\n（完整班名或1.1，不支持范围）",
-        "任课配置\n（班级/范围：科目；如一年级1-7班：语文）",
+        "任课配置\n（班级/范围：科目(节数)；见填写说明）",
     ]
     assert all(
         cell.fill.fill_type is None
@@ -329,13 +340,22 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
         "B2:B1001",
         "C2:C1001",
     }
+    instructions = "\n".join(
+        str(template_workbook["填写说明"].cell(row, 2).value or "")
+        for row in range(2, 10)
+    )
+    assert "同一文件中姓名完全相同的多行自动合并为一位教师" in instructions
+    assert "真实重名教师必须主动区分姓名" in instructions
+    assert "同名三行分别填13、1、1，导入后该教师为15节" in instructions
+    assert "主授" not in instructions
+    assert template_workbook["填写说明"]["A9"].border.right.style == "thin"
 
     created = client.post("/api/teachers", json={"name": "王老师", "subject_ids": ["english"], "min_weekly_lessons": 8})
     assert created.status_code == 200
     template_sheet = template_workbook["教师名单"]
     for row_index, values in enumerate((
         ["王老师", 12, "是", "1.1", "一年级1-2班：语文、数学"],
-        ["王老师", 10, "否", "", "1.1：体育"],
+        ["王老师", 10, "", "", "1.1：体育"],
         ["李老师", 0, "否", "", ""],
     ), start=2):
         for column_index, value in enumerate(values, start=1):
@@ -348,29 +368,30 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
         files={"file": ("teachers.xlsx", content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert imported.status_code == 200, imported.text
-    assert imported.json()["import"] | {"details": []} == {
-        "created": 2,
+    assert imported.json()["import"] | {"details": [], "shortages": []} == {
+        "created": 1,
         "updated": 1,
-        "renamed": 1,
-        "total": 3,
+        "merged_rows": 1,
+        "source_rows": 3,
+        "total": 2,
         "assigned": 5,
         "homerooms": 1,
+        "shortages": [],
         "details": [],
     }
     teachers = {item["name"]: item for item in imported.json()["state"]["teachers"]}
-    assert set(teachers) == {"王老师", "王老师（2）", "李老师"}
-    assert teachers["王老师"]["subject_ids"] == ["chinese", "math"]
-    assert teachers["王老师"]["min_weekly_lessons"] == 12
-    assert teachers["王老师（2）"]["subject_ids"] == ["pe"]
+    assert set(teachers) == {"王老师", "李老师"}
+    assert teachers["王老师"]["subject_ids"] == ["chinese", "math", "pe"]
+    assert teachers["王老师"]["min_weekly_lessons"] == 22
     assert teachers["李老师"]["subject_ids"] == []
     assert teachers["王老师"]["homeroom_class_id"] == "g1c1"
     imported_state = imported.json()["state"]
-    assert imported_state["assignments"]["g1c1"]["chinese"] == teachers["王老师"]["id"]
-    assert imported_state["assignments"]["g1c1"]["reading"] == teachers["王老师"]["id"]
-    assert imported_state["assignments"]["g1c1"]["meeting"] == teachers["王老师"]["id"]
-    assert imported_state["assignments"]["g1c1"]["pe"] == teachers["王老师（2）"]["id"]
-    assert imported_state["assignments"]["g1c2"]["chinese"] == teachers["王老师"]["id"]
-    assert imported_state["assignments"]["g1c2"]["math"] == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c1"]["chinese"]) == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c1"]["reading"]) == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c1"]["meeting"]) == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c1"]["pe"]) == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c2"]["chinese"]) == teachers["王老师"]["id"]
+    assert _first_teacher_id(imported_state["assignments"]["g1c2"]["math"]) == teachers["王老师"]["id"]
 
     imported_again = client.post(
         "/api/teachers/import",
@@ -378,18 +399,114 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     )
     assert imported_again.status_code == 200
     assert imported_again.json()["import"]["created"] == 0
-    assert imported_again.json()["import"]["updated"] == 3
-    assert len(imported_again.json()["state"]["teachers"]) == 3
+    assert imported_again.json()["import"]["updated"] == 2
+    assert len(imported_again.json()["state"]["teachers"]) == 2
 
     bad_content = _teacher_import_file([["错误教师", 12, "否", "", "一年级1班：不存在的科目"]])
     rejected = client.post("/api/teachers/import", files={"file": ("bad.xlsx", bad_content)})
     assert rejected.status_code == 422
-    assert len(client.get("/api/state").json()["state"]["teachers"]) == 3
+    assert len(client.get("/api/state").json()["state"]["teachers"]) == 2
 
     bad_range = _teacher_import_file([["范围错误教师", 12, "否", "", "一年级1-7班：语文"]])
     rejected_range = client.post("/api/teachers/import", files={"file": ("bad-range.xlsx", bad_range)})
     assert rejected_range.status_code == 422
     assert "一年级7班" in rejected_range.json()["detail"]
+
+
+def test_teacher_import_merges_repeated_name_rows_and_requires_manual_homonym_labels(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
+    client = TestClient(main.app)
+    _login(client)
+
+    repeated = _teacher_import_file([
+        ["郭传荣", 13, "是", "2.1", "二年级1班：语文"],
+        ["郭传荣", 1, "", "", "二年级1班：校本课程"],
+        ["郭传荣", 1, "", "", "二年级1班：实践"],
+        ["张伟（语文）", 8, "否", "", "二年级2班：语文"],
+        ["张伟（体育）", 4, "否", "", "二年级2班：体育"],
+    ])
+    imported = client.post("/api/teachers/import", files={"file": ("repeated.xlsx", repeated)})
+    assert imported.status_code == 200, imported.text
+    summary = imported.json()["import"]
+    assert {key: summary[key] for key in ("source_rows", "total", "merged_rows", "created", "updated")} == {
+        "source_rows": 5,
+        "total": 3,
+        "merged_rows": 2,
+        "created": 3,
+        "updated": 0,
+    }
+    teachers = {item["name"]: item for item in imported.json()["state"]["teachers"]}
+    assert set(teachers) == {"郭传荣", "张伟（语文）", "张伟（体育）"}
+    assert teachers["郭传荣"]["min_weekly_lessons"] == 15
+    assert teachers["郭传荣"]["subject_ids"] == ["chinese", "school", "practice"]
+    assert teachers["郭传荣"]["homeroom_class_id"] == "g2c1"
+    state = imported.json()["state"]
+    for subject_id in ("chinese", "school", "practice"):
+        assert _first_teacher_id(state["assignments"]["g2c1"][subject_id]) == teachers["郭传荣"]["id"]
+
+    conflict = _teacher_import_file([
+        ["同一教师", 8, "是", "1.1", "一年级1班：语文"],
+        ["同一教师", 3, "是", "1.2", "一年级2班：数学"],
+    ])
+    rejected = client.post("/api/teachers/import", files={"file": ("conflict.xlsx", conflict)})
+    assert rejected.status_code == 422
+    assert "班主任信息不一致" in rejected.json()["detail"]
+
+
+def test_teacher_import_supports_shared_lesson_quotas_and_strong_shortage_confirmation(tmp_path, monkeypatch) -> None:
+    local_store = StateStore(tmp_path / "state.json")
+    monkeypatch.setattr(main, "store", local_store)
+    client = TestClient(main.app)
+    _login(client)
+
+    exact_content = _teacher_import_file([
+        ["体育甲", 0, "否", "", "一年级1班：体育(2节)"],
+        ["体育乙", 0, "否", "", "一年级1班：体育(1节)"],
+        ["体育丙", 0, "否", "", "一年级1班：体育(1节)"],
+    ])
+    imported = client.post("/api/teachers/import", files={"file": ("exact.xlsx", exact_content)})
+    assert imported.status_code == 200, imported.text
+    assert not imported.json().get("requires_confirmation")
+    teachers = {item["name"]: item["id"] for item in imported.json()["state"]["teachers"]}
+    pe_allocations = imported.json()["state"]["assignments"]["g1c1"]["pe"]
+    assert [(item["teacher_id"], item["lessons"]) for item in pe_allocations] == [
+        (teachers["体育甲"], 2),
+        (teachers["体育乙"], 1),
+        (teachers["体育丙"], 1),
+    ]
+    assert all(set(item) == {"teacher_id", "lessons"} for item in pe_allocations)
+
+    shortage_content = _teacher_import_file([
+        ["二班体育", 0, "否", "", "一年级2班：体育(2节)"],
+    ])
+    preview = client.post("/api/teachers/import", files={"file": ("short.xlsx", shortage_content)})
+    assert preview.status_code == 200
+    assert preview.json()["requires_confirmation"] is True
+    shortage = preview.json()["shortages"][0]
+    assert {key: shortage[key] for key in ("class_id", "assigned", "expected", "missing")} == {
+        "class_id": "g1c2",
+        "assigned": 2,
+        "expected": 4,
+        "missing": 2,
+    }
+    assert "二班体育" not in {item["name"] for item in client.get("/api/state").json()["state"]["teachers"]}
+
+    confirmed = client.post(
+        "/api/teachers/import?allow_incomplete=true",
+        files={"file": ("short.xlsx", shortage_content)},
+    )
+    assert confirmed.status_code == 200
+    assert "二班体育" in {item["name"] for item in confirmed.json()["state"]["teachers"]}
+
+    over_content = _teacher_import_file([
+        ["三班体育甲", 0, "否", "", "一年级3班：体育(3节)"],
+        ["三班体育乙", 0, "否", "", "一年级3班：体育(2节)"],
+    ])
+    before_names = {item["name"] for item in client.get("/api/state").json()["state"]["teachers"]}
+    rejected = client.post("/api/teachers/import", files={"file": ("over.xlsx", over_content)})
+    assert rejected.status_code == 422
+    assert "超过标准4节" in rejected.json()["detail"]
+    assert {item["name"] for item in client.get("/api/state").json()["state"]["teachers"]} == before_names
 
 
 def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> None:
@@ -549,7 +666,7 @@ def test_upstash_store_initializes_and_persists(monkeypatch) -> None:
     monkeypatch.setattr(cloud_store, "_execute", fake_execute)
     initial = cloud_store.load()
     assert initial["school_name"] == "高唐县民族实验小学"
-    assert json.loads(remote["test-state"])["schema_version"] == 3
+    assert json.loads(remote["test-state"])["schema_version"] == 5
 
     initial["school_name"] = "云端测试学校"
     cloud_store.save(initial)

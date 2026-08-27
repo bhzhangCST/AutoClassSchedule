@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from .constants import CURRICULUM
+from .teaching_allocations import full_allocation, highest_lesson_teacher_id
+
 
 def normalize_teacher_records(state: dict[str, Any]) -> bool:
     """Migrate teacher records and discard homeroom links to removed classes."""
@@ -34,13 +37,15 @@ def apply_required_teacher_assignments(state: dict[str, Any]) -> bool:
     homeroom_by_class = homeroom_teachers(state)
     for class_item in state.get("classes", []):
         class_id = class_item["id"]
+        grade = int(class_item["grade"])
         assignments = state.setdefault("assignments", {}).setdefault(class_id, {})
         required = {
-            "reading": assignments.get("chinese"),
+            "reading": highest_lesson_teacher_id(assignments.get("chinese")),
             "meeting": homeroom_by_class.get(class_id),
         }
         for subject_id, teacher_id in required.items():
-            if subject_id not in assignments or assignments.get(subject_id) != teacher_id:
-                assignments[subject_id] = teacher_id
+            required_value = full_allocation(teacher_id, CURRICULUM[grade][subject_id])
+            if subject_id not in assignments or assignments.get(subject_id) != required_value:
+                assignments[subject_id] = required_value
                 changed = True
     return changed

@@ -5,7 +5,7 @@ from collections import Counter, defaultdict
 from app.assignment_rules import apply_required_teacher_assignments
 from app.constants import CORE_SUBJECTS, CURRICULUM, DAYS, SMALL_CLASS_SUBJECTS, fixed_lessons_for_grade, slots_for_grade
 from app.scheduler import SLOT_META, generate_schedule
-from app.store import default_state
+from app.store import default_state, normalize_state
 
 
 def _configure_required_teachers(state: dict) -> None:
@@ -41,6 +41,50 @@ def test_default_state_generates_complete_schedule() -> None:
         for day in DAYS:
             for period in ("am1", "am2"):
                 assert lessons[f"{day['id']}-{period}"]["subject_id"] in CORE_SUBJECTS
+
+
+def test_old_allocation_metadata_is_removed_during_migration() -> None:
+    state = default_state()
+    state["schema_version"] = 4
+    state["teachers"] = [{
+        "id": "t_legacy",
+        "name": "旧版语文教师",
+        "subject_ids": ["chinese"],
+        "min_weekly_lessons": 0,
+        "homeroom_class_id": None,
+    }]
+    state["assignments"]["g1c1"]["chinese"] = [
+        {"teacher_id": "t_legacy", "lessons": 8, "primary": True}
+    ]
+
+    assert normalize_state(state) is True
+    assert state["schema_version"] == 5
+    assert state["assignments"]["g1c1"]["chinese"] == [
+        {"teacher_id": "t_legacy", "lessons": 8}
+    ]
+    assert state["assignments"]["g1c1"]["reading"] == [
+        {"teacher_id": "t_legacy", "lessons": 2}
+    ]
+
+
+def test_reading_uses_the_chinese_teacher_with_the_most_lessons() -> None:
+    state = default_state()
+    state["classes"] = [state["classes"][0]]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+    state["teachers"] = [
+        {"id": "t_chinese_minor", "name": "语文教师乙", "subject_ids": ["chinese"], "min_weekly_lessons": 0, "homeroom_class_id": None},
+        {"id": "t_chinese_major", "name": "语文教师甲", "subject_ids": ["chinese"], "min_weekly_lessons": 0, "homeroom_class_id": None},
+    ]
+    state["assignments"]["g1c1"]["chinese"] = [
+        {"teacher_id": "t_chinese_minor", "lessons": 2},
+        {"teacher_id": "t_chinese_major", "lessons": 6},
+    ]
+
+    apply_required_teacher_assignments(state)
+
+    assert state["assignments"]["g1c1"]["reading"] == [
+        {"teacher_id": "t_chinese_major", "lessons": 2}
+    ]
 
 
 def test_schedule_allows_missing_chinese_teacher_and_homeroom() -> None:
@@ -178,3 +222,42 @@ def test_reading_and_meeting_follow_required_teachers() -> None:
     assert lessons["wed-pm2"]["teacher_id"] == required_teacher
     assert lessons["wed-pm3"]["teacher_id"] == required_teacher
     assert lessons["mon-pm3"]["teacher_id"] == required_teacher
+
+
+def test_one_subject_can_be_split_between_multiple_teachers_by_exact_lesson_count() -> None:
+    state = default_state()
+    state["classes"] = [state["classes"][0]]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+    state["teachers"] = [
+        {"id": "t_pe_2", "name": "体育教师", "subject_ids": ["pe"], "min_weekly_lessons": 0, "homeroom_class_id": None},
+        {"id": "t_pe_1", "name": "代课教师甲", "subject_ids": ["pe"], "min_weekly_lessons": 0, "homeroom_class_id": None},
+        {"id": "t_pe_1b", "name": "代课教师乙", "subject_ids": ["pe"], "min_weekly_lessons": 0, "homeroom_class_id": None},
+    ]
+    state["assignments"]["g1c1"]["pe"] = [
+        {"teacher_id": "t_pe_2", "lessons": 2},
+        {"teacher_id": "t_pe_1", "lessons": 1},
+        {"teacher_id": "t_pe_1b", "lessons": 1},
+    ]
+
+    result = generate_schedule(state, seed=20260827, attempts=20)
+
+    assert result["success"], result.get("errors")
+    pe_teachers = Counter(
+        lesson["teacher_id"]
+        for lesson in result["lessons"]["g1c1"].values()
+        if lesson["subject_id"] == "pe"
+    )
+    assert pe_teachers == Counter({"t_pe_2": 2, "t_pe_1": 1, "t_pe_1b": 1})
+    ordered_pe_teachers = [
+        result["lessons"]["g1c1"][slot]["teacher_id"]
+        for slot in sorted(
+            (
+                slot
+                for slot, lesson in result["lessons"]["g1c1"].items()
+                if lesson["subject_id"] == "pe"
+            ),
+            key=lambda slot: (SLOT_META[slot]["day_index"], SLOT_META[slot]["period_index"]),
+        )
+    ]
+    assert all(left != right for left, right in zip(ordered_pe_teachers, ordered_pe_teachers[1:]))
+    assert result["quality"]["unassigned_lessons"] == sum(CURRICULUM[1].values()) - 4

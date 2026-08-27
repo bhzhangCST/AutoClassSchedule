@@ -116,14 +116,34 @@ function teacherMap() {
   return Object.fromEntries(appData.state.teachers.map((teacher) => [teacher.id, teacher]));
 }
 
+function allocationList(value, totalLessons = 0) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item?.teacher_id && Number(item.lessons) > 0)
+      .map((item) => ({ teacher_id: item.teacher_id, lessons: Number(item.lessons) }));
+  }
+  return value ? [{ teacher_id: value, lessons: Number(totalLessons) }] : [];
+}
+
+function allocationTotal(value, totalLessons = 0) {
+  return allocationList(value, totalLessons).reduce((sum, item) => sum + item.lessons, 0);
+}
+
+function highestLessonAllocation(value) {
+  return (value || []).reduce((best, item) => (
+    !best || Number(item.lessons) > Number(best.lessons) ? item : best
+  ), null);
+}
+
 function configuredTeacherLoads() {
   const loads = Object.fromEntries(appData.state.teachers.map((teacher) => [teacher.id, 0]));
   for (const classItem of appData.state.classes) {
     const curriculum = appData.meta.curriculum[String(classItem.grade)];
     const assignments = appData.state.assignments[classItem.id] || {};
     for (const [subjectId, hours] of Object.entries(curriculum)) {
-      const teacherId = assignments[subjectId];
-      if (teacherId && teacherId in loads) loads[teacherId] += hours;
+      for (const allocation of allocationList(assignments[subjectId], hours)) {
+        if (allocation.teacher_id in loads) loads[allocation.teacher_id] += allocation.lessons;
+      }
     }
   }
   return loads;
@@ -137,7 +157,7 @@ function assignmentStats() {
     const assignments = appData.state.assignments[classItem.id] || {};
     for (const subjectId of Object.keys(curriculum)) {
       total += 1;
-      if (assignments[subjectId]) assigned += 1;
+      if (allocationTotal(assignments[subjectId], curriculum[subjectId]) === curriculum[subjectId]) assigned += 1;
     }
   }
   return { total, assigned };
@@ -230,7 +250,9 @@ function renderTeachers(filter = document.getElementById("teacher-search")?.valu
 }
 
 function renderTeacherSubjectOptions(selected = []) {
-  document.getElementById("teacher-subject-options").innerHTML = appData.meta.subjects.map((subject) => `
+  const container = document.getElementById("teacher-subject-options");
+  if (!container) return;
+  container.innerHTML = appData.meta.subjects.map((subject) => `
     <label class="subject-option"><input type="checkbox" value="${subject.id}" ${selected.includes(subject.id) ? "checked" : ""}><span>${escapeHtml(subject.short)}</span></label>
   `).join("");
 }
@@ -268,6 +290,7 @@ function newTeacherRange(values = {}) {
     start_class_id: values.start_class_id || classes[0]?.id || "",
     end_class_id: values.end_class_id || values.start_class_id || classes[0]?.id || "",
     subject_id: values.subject_id || "",
+    lessons: Number(values.lessons || 1),
   };
 }
 
@@ -277,24 +300,31 @@ function teacherRangesFromState(teacherId) {
   for (const grade of grades) {
     const classes = teacherRangeClasses(grade);
     for (const subject of teacherRangeSubjects(grade)) {
-      const assignedIndexes = classes
-        .map((classItem, index) => appData.state.assignments[classItem.id]?.[subject.id] === teacherId ? index : -1)
-        .filter((index) => index >= 0);
-      if (!assignedIndexes.length) continue;
-      let rangeStart = assignedIndexes[0];
-      let rangeEnd = assignedIndexes[0];
-      for (const current of [...assignedIndexes.slice(1), null]) {
-        if (current !== null && current === rangeEnd + 1) {
-          rangeEnd = current;
+      let rangeStart = null;
+      let rangeEnd = null;
+      let rangeShare = null;
+      for (let index = 0; index <= classes.length; index += 1) {
+        const classItem = classes[index];
+        const hours = appData.meta.curriculum[String(grade)]?.[subject.id] || 0;
+        const share = classItem
+          ? allocationList(appData.state.assignments[classItem.id]?.[subject.id], hours).find((item) => item.teacher_id === teacherId)
+          : null;
+        if (share && rangeShare && share.lessons === rangeShare.lessons) {
+          rangeEnd = index;
           continue;
         }
-        ranges.push(newTeacherRange({
-          grade,
-          start_class_id: classes[rangeStart].id,
-          end_class_id: classes[rangeEnd].id,
-          subject_id: subject.id,
-        }));
-        if (current !== null) rangeStart = rangeEnd = current;
+        if (rangeShare) {
+          ranges.push(newTeacherRange({
+            grade,
+            start_class_id: classes[rangeStart].id,
+            end_class_id: classes[rangeEnd].id,
+            subject_id: subject.id,
+            lessons: rangeShare.lessons,
+          }));
+        }
+        rangeStart = share ? index : null;
+        rangeEnd = share ? index : null;
+        rangeShare = share || null;
       }
     }
   }
@@ -310,22 +340,31 @@ function expandedTeacherAssignments() {
     const endIndex = classes.findIndex((item) => item.id === range.end_class_id);
     if (startIndex < 0 || endIndex < startIndex) continue;
     for (const classItem of classes.slice(startIndex, endIndex + 1)) {
-      if (!expanded[classItem.id]) expanded[classItem.id] = new Set();
-      expanded[classItem.id].add(range.subject_id);
+      if (!expanded[classItem.id]) expanded[classItem.id] = {};
+      const previous = expanded[classItem.id][range.subject_id];
+      expanded[classItem.id][range.subject_id] = {
+        lessons: Number(range.lessons || 0) + Number(previous?.lessons || 0),
+      };
     }
   }
-  return Object.fromEntries(
-    Object.entries(expanded).map(([classId, subjectIds]) => [classId, [...subjectIds]]),
-  );
+  return expanded;
 }
 
-function teacherAssignmentConflictCount(assignments, teacherId = "") {
-  return Object.entries(assignments).reduce((count, [classId, subjectIds]) => (
-    count + subjectIds.filter((subjectId) => {
-      const assignedTeacher = appData.state.assignments[classId]?.[subjectId];
-      return assignedTeacher && assignedTeacher !== teacherId;
-    }).length
-  ), 0);
+function teacherAssignmentIssues(assignments, teacherId = "") {
+  const issues = { over: 0, incomplete: 0, shared: 0 };
+  for (const [classId, subjectMap] of Object.entries(assignments)) {
+    const classItem = appData.state.classes.find((item) => item.id === classId);
+    const curriculum = appData.meta.curriculum[String(classItem?.grade)] || {};
+    for (const [subjectId, share] of Object.entries(subjectMap)) {
+      const existing = allocationList(appData.state.assignments[classId]?.[subjectId], curriculum[subjectId]);
+      const others = existing.filter((item) => item.teacher_id !== teacherId);
+      const total = others.reduce((sum, item) => sum + item.lessons, 0) + Number(share.lessons || 0);
+      if (others.length) issues.shared += 1;
+      if (total > curriculum[subjectId]) issues.over += 1;
+      else if (total > 0 && total < curriculum[subjectId]) issues.incomplete += 1;
+    }
+  }
+  return issues;
 }
 
 function syncTeacherSubjectsFromRanges() {
@@ -339,13 +378,17 @@ function updateTeacherRangeStatus() {
   const status = document.getElementById("teacher-range-status");
   const assignments = expandedTeacherAssignments();
   const classCount = Object.keys(assignments).length;
-  const assignmentCount = Object.values(assignments).reduce((sum, subjectIds) => sum + subjectIds.length, 0);
-  const conflictCount = teacherAssignmentConflictCount(assignments, document.getElementById("teacher-id").value);
-  status.classList.toggle("warning", conflictCount > 0);
+  const assignmentCount = Object.values(assignments).reduce((sum, subjectMap) => sum + Object.keys(subjectMap).length, 0);
+  const issues = teacherAssignmentIssues(assignments, document.getElementById("teacher-id").value);
+  status.classList.toggle("warning", issues.over > 0 || issues.incomplete > 0);
   if (!assignmentCount) {
     status.textContent = "尚未添加任课范围";
-  } else if (conflictCount) {
-    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课；其中 ${conflictCount} 项将替换原教师`;
+  } else if (issues.over) {
+    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课；${issues.over} 项课时合计超出标准，无法保存`;
+  } else if (issues.incomplete) {
+    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课；${issues.incomplete} 项仍有未分配课时`;
+  } else if (issues.shared) {
+    status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课；${issues.shared} 项由多位教师共同承担`;
   } else {
     status.textContent = `已选 ${classCount} 个班、${assignmentCount} 项任课`;
   }
@@ -367,6 +410,8 @@ function renderTeacherAssignmentRanges() {
     range.start_class_id = classes[startIndex]?.id || "";
     range.end_class_id = classes[endIndex]?.id || range.start_class_id;
     if (!subjects.some((subject) => subject.id === range.subject_id)) range.subject_id = "";
+    const maxLessons = range.subject_id ? Number(appData.meta.curriculum[String(range.grade)]?.[range.subject_id] || 1) : 35;
+    range.lessons = Math.min(Math.max(1, Number(range.lessons || 1)), maxLessons);
     const classOptions = (selectedId, minimumIndex = 0) => classes.map((classItem, index) => `
       <option value="${classItem.id}" ${index < minimumIndex ? "disabled" : ""} ${classItem.id === selectedId ? "selected" : ""}>${escapeHtml(classItem.name)}</option>
     `).join("");
@@ -375,6 +420,7 @@ function renderTeacherAssignmentRanges() {
       <label class="teacher-range-field"><span>起始班级</span><select data-teacher-range-field="start_class_id">${classOptions(range.start_class_id)}</select></label>
       <label class="teacher-range-field"><span>结束班级</span><select data-teacher-range-field="end_class_id">${classOptions(range.end_class_id, startIndex)}</select></label>
       <label class="teacher-range-field teacher-range-subject"><span>任教学科</span><select data-teacher-range-field="subject_id" required><option value="">选择科目</option>${subjects.map((subject) => `<option value="${subject.id}" ${subject.id === range.subject_id ? "selected" : ""}>${escapeHtml(subject.short)}</option>`).join("")}</select></label>
+      <label class="teacher-range-field teacher-range-lessons"><span>每班节数</span><input data-teacher-range-field="lessons" type="number" min="1" max="${maxLessons}" value="${range.lessons}" required></label>
       <button class="tiny-button danger teacher-range-remove" type="button" data-remove-teacher-range="${range.id}">移除</button>
     </div>`;
   }).join("");
@@ -389,7 +435,6 @@ function openTeacherDialog(teacherId = null) {
   document.getElementById("teacher-name").value = teacher?.name || "";
   document.getElementById("teacher-min-lessons").value = teacher?.min_weekly_lessons ?? 12;
   renderTeacherHomeroomOptions(teacher);
-  renderTeacherSubjectOptions(teacher?.subject_ids || []);
   teacherAssignmentRanges = teacher ? teacherRangesFromState(teacher.id) : [];
   renderTeacherAssignmentRanges();
   document.getElementById("teacher-dialog").showModal();
@@ -409,17 +454,26 @@ async function deleteTeacher(teacherId) {
   }
 }
 
-function assignmentNamesFromState(classItem) {
+function assignmentValuesFromState(classItem) {
   const assignments = appData.state.assignments[classItem.id] || {};
   const teachers = teacherMap();
   const curriculum = appData.meta.curriculum[String(classItem.grade)];
-  return Object.fromEntries(
-    Object.keys(curriculum).map((subjectId) => [subjectId, teachers[assignments[subjectId]]?.name || ""]),
-  );
+  return Object.fromEntries(Object.entries(curriculum).map(([subjectId, hours]) => [
+    subjectId,
+    allocationList(assignments[subjectId], hours).map((item) => ({ ...item, name: teachers[item.teacher_id]?.name || "" })),
+  ]));
+}
+
+function comparableAssignmentValues(values, subjectIds) {
+  return Object.fromEntries(subjectIds.map((subjectId) => [subjectId, (values[subjectId] || []).map((item) => ({
+    teacher_id: item.teacher_id || "",
+    name: item.name || "",
+    lessons: Number(item.lessons || 0),
+  }))]));
 }
 
 function assignmentValuesMatch(left, right, subjectIds) {
-  return subjectIds.every((subjectId) => (left[subjectId] || "") === (right[subjectId] || ""));
+  return JSON.stringify(comparableAssignmentValues(left, subjectIds)) === JSON.stringify(comparableAssignmentValues(right, subjectIds));
 }
 
 function updateAssignmentDraftStatus() {
@@ -432,13 +486,22 @@ function updateAssignmentDraftStatus() {
 
 function captureCurrentAssignmentDraft() {
   if (!appData.state || !currentAssignmentClassId) return;
-  const inputs = [...document.querySelectorAll("[data-assignment-subject]")];
-  if (!inputs.length) return;
   const classItem = appData.state.classes.find((item) => item.id === currentAssignmentClassId);
   if (!classItem) return;
-  const values = Object.fromEntries(inputs.map((input) => [input.dataset.assignmentSubject, input.value.trim()]));
-  const baseValues = assignmentNamesFromState(classItem);
   const subjectIds = Object.keys(appData.meta.curriculum[String(classItem.grade)]);
+  const values = Object.fromEntries(subjectIds.map((subjectId) => [subjectId, []]));
+  for (const row of document.querySelectorAll("[data-assignment-allocation-row]")) {
+    const subjectId = row.dataset.assignmentSubject;
+    const name = row.querySelector("[data-assignment-teacher]")?.value.trim() || "";
+    if (!name || !values[subjectId]) continue;
+    const teacher = appData.state.teachers.find((item) => item.name === name);
+    values[subjectId].push({
+      teacher_id: teacher?.id || "",
+      name,
+      lessons: Number(row.querySelector("[data-assignment-lessons]")?.value || 0),
+    });
+  }
+  const baseValues = assignmentValuesFromState(classItem);
   if (assignmentValuesMatch(values, baseValues, subjectIds)) {
     assignmentDrafts.delete(classItem.id);
   } else {
@@ -479,25 +542,41 @@ function renderAssignments() {
   if (!classItem) return;
   const curriculum = appData.meta.curriculum[String(classItem.grade)];
   const assignments = appData.state.assignments[classItem.id] || {};
-  const displayAssignments = { ...(assignmentDrafts.get(classItem.id) || assignmentNamesFromState(classItem)) };
+  const displayAssignments = assignmentDrafts.get(classItem.id) || assignmentValuesFromState(classItem);
   const teachers = appData.state.teachers;
   const teachersById = teacherMap();
-  displayAssignments.reading = displayAssignments.chinese || "";
-  displayAssignments.meeting = teachersById[assignments.meeting]?.name || "";
   const subjects = subjectMap();
-  const assignedCount = Object.keys(curriculum).filter((subjectId) => displayAssignments[subjectId]).length;
+  const assignedCount = Object.entries(curriculum).filter(([subjectId, hours]) => (
+    (displayAssignments[subjectId] || []).reduce((sum, item) => (item.name || item.teacher_id) ? sum + Number(item.lessons || 0) : sum, 0) === hours
+  )).length;
   document.getElementById("assignment-grade-label").textContent = gradeNames[classItem.grade];
   document.getElementById("assignment-class-name").textContent = classItem.name;
   document.getElementById("assignment-progress").textContent = `${assignedCount} / ${Object.keys(curriculum).length}`;
   document.getElementById("assignment-progress").classList.toggle("good", assignedCount === Object.keys(curriculum).length);
   document.getElementById("assignment-grid").innerHTML = Object.entries(curriculum).map(([subjectId, hours]) => {
     const subject = subjects[subjectId];
-    const assignedTeacher = assignments[subjectId] || "";
-    const eligible = teachers.filter((teacher) => teacher.subject_ids.length === 0 || teacher.subject_ids.includes(subjectId) || teacher.id === assignedTeacher);
-    const assignedName = displayAssignments[subjectId] || "";
+    const locked = ["reading", "meeting"].includes(subjectId);
+    let savedAllocations = allocationList(assignments[subjectId], hours).map((item) => ({ ...item, name: teachersById[item.teacher_id]?.name || "" }));
+    if (subjectId === "reading") {
+      const chineseAllocations = displayAssignments.chinese || [];
+      const chineseTeacher = highestLessonAllocation(chineseAllocations);
+      savedAllocations = chineseTeacher?.name ? [{ ...chineseTeacher, lessons: hours }] : [];
+    }
+    const sourceAllocations = locked ? savedAllocations : (displayAssignments[subjectId] || []);
+    const shownAllocations = sourceAllocations.length ? sourceAllocations : (locked ? [] : [{ teacher_id: "", name: "", lessons: hours }]);
+    const total = sourceAllocations.reduce((sum, item) => (item.name || item.teacher_id) ? sum + Number(item.lessons || 0) : sum, 0);
     const listId = `teacher-options-${subjectId}`;
-    const lockedReason = subjectId === "reading" ? "随本班语文教师自动同步" : (subjectId === "meeting" ? "随本班班主任自动同步" : "");
-    return `<div class="assignment-row ${lockedReason ? "locked-assignment" : ""}"><div class="assignment-subject"><span class="subject-color" style="background:${subject.color}"></span><div><strong>${escapeHtml(subject.name)}</strong><span>每周 ${hours} 节</span></div></div><div class="teacher-search-field"><input type="search" list="${listId}" value="${escapeHtml(assignedName)}" placeholder="${lockedReason ? "自动设置" : "搜索教师姓名"}" aria-label="${escapeHtml(subject.name)}任课教师" data-assignment-subject="${subjectId}" data-eligible-teachers="${eligible.map((teacher) => teacher.id).join(",")}" ${lockedReason ? "disabled" : ""}><datalist id="${listId}">${eligible.map((teacher) => `<option value="${escapeHtml(teacher.name)}"></option>`).join("")}</datalist><span>${lockedReason || `${eligible.length} 名可选教师`}</span></div></div>`;
+    const lockedReason = subjectId === "reading" ? "随本班语文课时数最多的教师自动同步" : (subjectId === "meeting" ? "随本班班主任自动同步" : "");
+    const totalClass = total > hours ? "over" : (total < hours ? "under" : "complete");
+    return `<div class="assignment-row ${locked ? "locked-assignment" : ""}" data-assignment-subject-card="${subjectId}">
+      <div class="assignment-subject"><span class="subject-color" style="background:${subject.color}"></span><div><strong>${escapeHtml(subject.name)}</strong><span>每周 ${hours} 节</span></div><span class="allocation-total ${totalClass}">${total} / ${hours}</span></div>
+      <div class="assignment-allocations">${shownAllocations.map((allocation) => `<div class="assignment-allocation-row" data-assignment-allocation-row data-assignment-subject="${subjectId}">
+        <div class="teacher-search-field"><input type="search" list="${listId}" value="${escapeHtml(allocation.name || teachersById[allocation.teacher_id]?.name || "")}" placeholder="${locked ? "未分配教师" : "搜索教师姓名"}" aria-label="${escapeHtml(subject.name)}任课教师" data-assignment-teacher ${locked ? "disabled" : ""}></div>
+        <label class="allocation-lessons"><span>节数</span><input data-assignment-lessons type="number" min="1" max="${hours}" value="${Number(allocation.lessons || hours)}" ${locked ? "disabled" : ""}></label>
+        ${locked ? "" : '<button class="tiny-button danger allocation-remove" type="button" data-remove-assignment-allocation>移除</button>'}
+      </div>`).join("")}${locked ? `<span class="allocation-help">${lockedReason}</span>` : `<button class="allocation-add" type="button" data-add-assignment-allocation="${subjectId}">+ 添加共同任课教师</button>`}</div>
+      <datalist id="${listId}">${teachers.map((teacher) => `<option value="${escapeHtml(teacher.name)}"></option>`).join("")}</datalist>
+    </div>`;
   }).join("");
   updateAssignmentDraftStatus();
 }
@@ -818,9 +897,9 @@ function buildPrintTimetable() {
         continue;
       }
       const subject = subjects[lesson.subject_id];
-      const primary = scheduleMode === "class" ? subject.name : lesson.class_name;
+      const mainText = scheduleMode === "class" ? subject.name : lesson.class_name;
       const secondary = scheduleMode === "class" ? (teachers[lesson.teacher_id]?.name || "") : subject.name;
-      html += `<td><strong>${escapeHtml(primary)}</strong>${secondary ? `<span>${escapeHtml(secondary)}</span>` : ""}</td>`;
+      html += `<td><strong>${escapeHtml(mainText)}</strong>${secondary ? `<span>${escapeHtml(secondary)}</span>` : ""}</td>`;
     }
     html += "</tr>";
   }
@@ -1016,8 +1095,14 @@ document.getElementById("teacher-range-list").addEventListener("change", (event)
     range.start_class_id = classes[0]?.id || "";
     range.end_class_id = classes[0]?.id || "";
     if (!teacherRangeSubjects(range.grade).some((subject) => subject.id === range.subject_id)) range.subject_id = "";
+    range.lessons = 1;
+  } else if (field === "lessons") {
+    range.lessons = Number(event.target.value || 1);
   } else {
     range[field] = event.target.value;
+    if (field === "subject_id" && range.subject_id) {
+      range.lessons = Number(appData.meta.curriculum[String(range.grade)]?.[range.subject_id] || 1);
+    }
     if (field === "start_class_id") {
       const classes = teacherRangeClasses(range.grade);
       const startIndex = classes.findIndex((item) => item.id === range.start_class_id);
@@ -1040,11 +1125,28 @@ document.getElementById("teacher-import-form").addEventListener("submit", async 
   setLoading(button, true, "正在校验…");
   result.classList.add("hidden");
   try {
-    const data = await api("/api/teachers/import", { method: "POST", body });
+    let data = await api("/api/teachers/import", { method: "POST", body });
+    if (data.requires_confirmation) {
+      const shown = data.shortages.slice(0, 8).map((item) => `${item.class_name}${item.subject_name}缺少${item.missing}节`).join("；");
+      const suffix = data.shortages.length > 8 ? `；另有${data.shortages.length - 8}项` : "";
+      const confirmed = await confirmDialog(
+        "任课课时尚未分配完整",
+        `${shown}${suffix}。这些课仍可排入课表，但教师将显示为未分配。确认后才会写入本次教师名单。`,
+        "确认保留缺口并导入",
+      );
+      if (!confirmed) {
+        result.textContent = "未导入。请修改表格中的任课节数后重新上传。";
+        result.classList.remove("hidden");
+        return;
+      }
+      const confirmedBody = new FormData();
+      confirmedBody.append("file", file);
+      data = await api("/api/teachers/import?allow_incomplete=true", { method: "POST", body: confirmedBody });
+    }
     applyStateResponse(data);
     document.getElementById("teacher-import-dialog").close();
     const summary = data.import;
-    showToast(`已处理 ${summary.total} 名教师：新增 ${summary.created}，更新 ${summary.updated}，任课 ${summary.assigned || 0} 项，班主任 ${summary.homerooms || 0} 项${summary.renamed ? `，同名区分 ${summary.renamed}` : ""}`);
+    showToast(`已处理 ${summary.total} 名教师：新增 ${summary.created}，更新 ${summary.updated}，任课 ${summary.assigned || 0} 项，班主任 ${summary.homerooms || 0} 项${summary.merged_rows ? `，合并同名行 ${summary.merged_rows}` : ""}`);
   } catch (error) {
     result.textContent = error.message;
     result.classList.remove("hidden");
@@ -1057,21 +1159,24 @@ document.getElementById("teacher-form").addEventListener("submit", async (event)
   const button = document.getElementById("save-teacher-button");
   const teacherId = document.getElementById("teacher-id").value;
   const teachingAssignments = expandedTeacherAssignments();
-  const conflictCount = teacherAssignmentConflictCount(teachingAssignments, teacherId);
-  if (conflictCount) {
+  const issues = teacherAssignmentIssues(teachingAssignments, teacherId);
+  if (issues.over) {
+    showToast(`有 ${issues.over} 项课程的教师课时合计超过课程标准，请调整后再保存`, "error");
+    return;
+  }
+  if (issues.incomplete) {
     const confirmed = await confirmDialog(
-      "替换已有任课教师",
-      `所选范围中有 ${conflictCount} 项课程已配置其他教师。保存后将由当前教师接替。`,
-      "确认替换",
+      "任课课时尚未分配完整",
+      `保存后仍有 ${issues.incomplete} 项课程存在未分配课时，这些课排课时不会显示教师。是否确认保存？`,
+      "确认保留缺口",
     );
     if (!confirmed) return;
   }
-  const rangeSubjectIds = Object.values(teachingAssignments).flat();
-  const selectedSubjectIds = [...document.querySelectorAll("#teacher-subject-options input:checked")].map((input) => input.value);
+  const rangeSubjectIds = Object.values(teachingAssignments).flatMap((subjectMap) => Object.keys(subjectMap));
   const payload = {
     name: document.getElementById("teacher-name").value,
     min_weekly_lessons: Number(document.getElementById("teacher-min-lessons").value),
-    subject_ids: [...new Set([...selectedSubjectIds, ...rangeSubjectIds])],
+    subject_ids: [...new Set(rangeSubjectIds)],
     homeroom_class_id: document.getElementById("teacher-homeroom-class").value || null,
     teaching_assignments: teachingAssignments,
   };
@@ -1080,7 +1185,7 @@ document.getElementById("teacher-form").addEventListener("submit", async (event)
     const data = await api(teacherId ? `/api/teachers/${teacherId}` : "/api/teachers", { method: teacherId ? "PUT" : "POST", body: JSON.stringify(payload) });
     document.getElementById("teacher-dialog").close();
     applyStateResponse(data);
-    const assignmentCount = Object.values(teachingAssignments).reduce((sum, subjectIds) => sum + subjectIds.length, 0);
+    const assignmentCount = Object.values(teachingAssignments).reduce((sum, subjectMap) => sum + Object.keys(subjectMap).length, 0);
     showToast(`${teacherId ? "教师资料已更新" : "教师已添加"}${assignmentCount ? `，已配置 ${assignmentCount} 项任课` : ""}`);
   } catch (error) {
     showToast(error.message, "error");
@@ -1097,31 +1202,42 @@ document.getElementById("assignment-form").addEventListener("submit", async (eve
     showToast("没有需要保存的任课修改");
     return;
   }
-  setLoading(button, true, "保存中…");
   const teachersByName = new Map(appData.state.teachers.map((teacher) => [teacher.name, teacher]));
   try {
     const classes = {};
+    let incompleteCount = 0;
     for (const [classId, draft] of assignmentDrafts.entries()) {
       const classItem = appData.state.classes.find((item) => item.id === classId);
       if (!classItem) continue;
       const curriculum = appData.meta.curriculum[String(classItem.grade)];
-      const savedAssignments = appData.state.assignments[classId] || {};
       const assignments = {};
       for (const subjectId of Object.keys(curriculum)) {
-        const name = (draft[subjectId] || "").trim();
-        const teacher = name ? teachersByName.get(name) : null;
-        if (name && !teacher) throw new Error(`${classItem.name}：未找到教师“${name}”，请从搜索建议中选择`);
-        const fixedTeacher = subjectId === "reading" || subjectId === "meeting";
-        const eligible = teacher && (
-          teacher.subject_ids.length === 0
-          || teacher.subject_ids.includes(subjectId)
-          || savedAssignments[subjectId] === teacher.id
-        );
-        if (teacher && !fixedTeacher && !eligible) throw new Error(`${classItem.name}：${teacher.name}未设置为该科目的可任教师`);
-        assignments[subjectId] = teacher?.id || null;
+        const seenTeachers = new Set();
+        assignments[subjectId] = (draft[subjectId] || []).map((allocation) => {
+          const name = (allocation.name || "").trim();
+          const teacher = name ? teachersByName.get(name) : null;
+          if (!teacher) throw new Error(`${classItem.name}：未找到教师“${name}”，请从搜索建议中选择`);
+          if (seenTeachers.has(teacher.id)) throw new Error(`${classItem.name}的同一课程不能重复选择${teacher.name}`);
+          seenTeachers.add(teacher.id);
+          const lessons = Number(allocation.lessons || 0);
+          if (!Number.isInteger(lessons) || lessons < 1) throw new Error(`${classItem.name}：任课节数必须是正整数`);
+          return { teacher_id: teacher.id, lessons };
+        });
+        const total = assignments[subjectId].reduce((sum, item) => sum + item.lessons, 0);
+        if (total > curriculum[subjectId]) throw new Error(`${classItem.name}的${subjectMap()[subjectId]?.name || subjectId}合计${total}节，超过标准${curriculum[subjectId]}节`);
+        if (total > 0 && total < curriculum[subjectId] && !["reading", "meeting"].includes(subjectId)) incompleteCount += 1;
       }
       classes[classId] = assignments;
     }
+    if (incompleteCount) {
+      const confirmed = await confirmDialog(
+        "任课课时尚未分配完整",
+        `共有 ${incompleteCount} 项课程只分配了部分课时；剩余课时仍会排课，但教师显示为未分配。是否确认保存？`,
+        "确认保留缺口",
+      );
+      if (!confirmed) return;
+    }
+    setLoading(button, true, "保存中…");
     const data = await api("/api/assignments", { method: "PUT", body: JSON.stringify({ classes }) });
     const savedCount = data.updated_classes;
     assignmentDrafts.clear();
@@ -1147,12 +1263,40 @@ document.getElementById("assignment-class-select").addEventListener("change", (e
   renderAssignments();
 });
 document.getElementById("assignment-form").addEventListener("input", (event) => {
-  if (!event.target.matches("[data-assignment-subject]")) return;
-  if (event.target.dataset.assignmentSubject === "chinese") {
-    const readingInput = document.querySelector('[data-assignment-subject="reading"]');
-    if (readingInput) readingInput.value = event.target.value;
-  }
+  if (!event.target.matches("[data-assignment-teacher], [data-assignment-lessons]")) return;
   captureCurrentAssignmentDraft();
+  const card = event.target.closest("[data-assignment-subject-card]");
+  if (card) {
+    const subjectId = card.dataset.assignmentSubjectCard;
+    const classItem = appData.state.classes.find((item) => item.id === currentAssignmentClassId);
+    const expected = appData.meta.curriculum[String(classItem.grade)][subjectId];
+    const total = [...card.querySelectorAll("[data-assignment-lessons]")].reduce((sum, input) => (
+      input.closest("[data-assignment-allocation-row]")?.querySelector("[data-assignment-teacher]")?.value.trim() ? sum + Number(input.value || 0) : sum
+    ), 0);
+    const badge = card.querySelector(".allocation-total");
+    badge.textContent = `${total} / ${expected}`;
+    badge.className = `allocation-total ${total > expected ? "over" : (total < expected ? "under" : "complete")}`;
+  }
+});
+document.getElementById("assignment-grid").addEventListener("click", (event) => {
+  const addButton = event.target.closest("[data-add-assignment-allocation]");
+  const removeButton = event.target.closest("[data-remove-assignment-allocation]");
+  if (!addButton && !removeButton) return;
+  captureCurrentAssignmentDraft();
+  const classItem = appData.state.classes.find((item) => item.id === currentAssignmentClassId);
+  if (!classItem) return;
+  const draft = assignmentDrafts.get(classItem.id) || assignmentValuesFromState(classItem);
+  if (addButton) {
+    const subjectId = addButton.dataset.addAssignmentAllocation;
+    draft[subjectId] = [...(draft[subjectId] || []), { teacher_id: "", name: "", lessons: 1 }];
+  } else {
+    const row = removeButton.closest("[data-assignment-allocation-row]");
+    const subjectId = row.dataset.assignmentSubject;
+    const index = [...row.parentElement.querySelectorAll("[data-assignment-allocation-row]")].indexOf(row);
+    draft[subjectId] = (draft[subjectId] || []).filter((_, itemIndex) => itemIndex !== index);
+  }
+  assignmentDrafts.set(classItem.id, draft);
+  renderAssignments();
 });
 window.addEventListener("beforeunload", (event) => {
   if (!assignmentDrafts.size && !scheduleSwapDraft?.swaps.length) return;

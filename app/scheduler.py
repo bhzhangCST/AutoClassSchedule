@@ -18,6 +18,7 @@ from .constants import (
     fixed_lessons_for_grade,
     slots_for_grade,
 )
+from .teaching_allocations import allocation_total, normalize_allocations
 
 SLOT_META: dict[str, dict[str, Any]] = {}
 for day_index, day in enumerate(DAYS):
@@ -31,9 +32,12 @@ for day_index, day in enumerate(DAYS):
         }
 
 
-def _teacher_for(assignments: dict[str, Any], class_id: str, subject_id: str) -> str | None:
-    teacher_id = assignments.get(class_id, {}).get(subject_id)
-    return teacher_id if teacher_id else None
+def _allocations_for(
+    assignments: dict[str, Any], class_id: str, subject_id: str, total_lessons: int
+) -> list[dict[str, Any]]:
+    return normalize_allocations(
+        assignments.get(class_id, {}).get(subject_id), total_lessons
+    )
 
 
 def _subject_allowed(grade: int, subject_id: str, slot: str) -> bool:
@@ -121,18 +125,20 @@ def _validate_inputs(state: dict[str, Any]) -> tuple[list[str], list[str], dict[
         if expected != actual:
             errors.append(f"{class_item['name']}课程总课时为{actual}，但可用课位为{expected}。")
         for subject_id, hours in CURRICULUM[grade].items():
-            teacher_id = _teacher_for(assignments, class_id, subject_id)
-            if not teacher_id:
-                continue
-            teacher = teachers.get(teacher_id)
-            if not teacher:
-                errors.append(f"{class_item['name']}的{SUBJECT_BY_ID[subject_id]['name']}引用了不存在的教师。")
-                continue
-            assigned_loads[teacher_id] += hours
-            classes_by_teacher_subject[(teacher_id, subject_id)].add(class_id)
-            qualified = teacher.get("subject_ids", [])
-            if qualified and subject_id not in qualified and subject_id not in {"reading", "meeting"}:
-                warnings.append(f"{teacher['name']}未标注可任教{SUBJECT_BY_ID[subject_id]['name']}，但已被分配到{class_item['name']}。")
+            allocations = _allocations_for(assignments, class_id, subject_id, hours)
+            assigned = allocation_total(allocations)
+            if assigned > hours:
+                errors.append(
+                    f"{class_item['name']}的{SUBJECT_BY_ID[subject_id]['name']}合计分配{assigned}节，超过标准{hours}节。"
+                )
+            for allocation in allocations:
+                teacher_id = allocation["teacher_id"]
+                teacher = teachers.get(teacher_id)
+                if not teacher:
+                    errors.append(f"{class_item['name']}的{SUBJECT_BY_ID[subject_id]['name']}引用了不存在的教师。")
+                    continue
+                assigned_loads[teacher_id] += int(allocation["lessons"])
+                classes_by_teacher_subject[(teacher_id, subject_id)].add(class_id)
 
     for teacher_id, load in assigned_loads.items():
         if load > 35:
@@ -156,28 +162,44 @@ def _prepare_fixed_lessons(
     assignments = state.get("assignments", {})
     lessons: dict[str, dict[str, dict[str, Any]]] = {}
     teacher_busy: dict[str, set[str]] = defaultdict(set)
-    fixed_owners: dict[tuple[str, str], list[str]] = defaultdict(list)
+    busy_owner: dict[tuple[str, str], str] = {}
+    conflicts: list[str] = []
+    teacher_map = {teacher["id"]: teacher["name"] for teacher in state.get("teachers", [])}
 
     for class_item in state.get("classes", []):
         class_id = class_item["id"]
         lessons[class_id] = {}
-        for slot, subject_id in fixed_lessons_for_grade(int(class_item["grade"])).items():
-            teacher_id = _teacher_for(assignments, class_id, subject_id)
-            lessons[class_id][slot] = _build_lesson(subject_id, teacher_id, fixed=True)
-            if teacher_id:
-                fixed_owners[(teacher_id, slot)].append(class_item["name"])
-
-    conflicts: list[str] = []
-    teacher_map = {teacher["id"]: teacher["name"] for teacher in state.get("teachers", [])}
-    for (teacher_id, slot), class_names in fixed_owners.items():
-        if len(class_names) > 1:
-            day_name = next(day["name"] for day in DAYS if day["id"] == SLOT_META[slot]["day_id"])
-            period_name = next(period["name"] for period in PERIODS if period["id"] == SLOT_META[slot]["period_id"])
-            conflicts.append(
-                f"固定课冲突：{teacher_map.get(teacher_id, '未知教师')}在{day_name}{period_name}同时被分配到{'、'.join(class_names)}。"
-            )
-        else:
-            teacher_busy[teacher_id].add(slot)
+        grade = int(class_item["grade"])
+        fixed_by_subject: dict[str, list[str]] = defaultdict(list)
+        for slot, subject_id in fixed_lessons_for_grade(grade).items():
+            fixed_by_subject[subject_id].append(slot)
+        for subject_id, fixed_slots in fixed_by_subject.items():
+            total = CURRICULUM[grade][subject_id]
+            allocations = _allocations_for(assignments, class_id, subject_id, total)
+            remaining_teachers: Counter[str | None] = Counter({
+                item["teacher_id"]: int(item["lessons"]) for item in allocations
+            })
+            remaining_teachers[None] = total - allocation_total(allocations)
+            for slot in sorted(fixed_slots, key=lambda item: SLOT_META[item]["period_index"]):
+                candidates = [
+                    teacher_id
+                    for teacher_id, count in remaining_teachers.items()
+                    if count > 0
+                ]
+                candidates.sort(key=lambda teacher_id: (bool(teacher_id and slot in teacher_busy[teacher_id]), teacher_id or ""))
+                teacher_id = candidates[0] if candidates else None
+                remaining_teachers[teacher_id] -= 1
+                lessons[class_id][slot] = _build_lesson(subject_id, teacher_id, fixed=True)
+                if teacher_id:
+                    previous_class = busy_owner.get((teacher_id, slot))
+                    if previous_class:
+                        day_name = next(day["name"] for day in DAYS if day["id"] == SLOT_META[slot]["day_id"])
+                        period_name = next(period["name"] for period in PERIODS if period["id"] == SLOT_META[slot]["period_id"])
+                        conflicts.append(
+                            f"固定课冲突：{teacher_map.get(teacher_id, '未知教师')}在{day_name}{period_name}同时被分配到{previous_class}、{class_item['name']}。"
+                        )
+                    teacher_busy[teacher_id].add(slot)
+                    busy_owner[(teacher_id, slot)] = class_item["name"]
     return lessons, teacher_busy, conflicts
 
 
@@ -192,22 +214,46 @@ def _schedule_one_class(
     class_id = class_item["id"]
     grade = int(class_item["grade"])
     remaining = Counter(CURRICULUM[grade])
+    remaining_allocations: dict[str, Counter[str | None]] = {}
+    for subject_id, total_lessons in CURRICULUM[grade].items():
+        subject_allocations = _allocations_for(
+            assignments, class_id, subject_id, total_lessons
+        )
+        shares: Counter[str | None] = Counter({
+            item["teacher_id"]: int(item["lessons"])
+            for item in subject_allocations
+        })
+        shares[None] = total_lessons - allocation_total(subject_allocations)
+        remaining_allocations[subject_id] = shares
     for lesson in class_lessons.values():
-        remaining[lesson["subject_id"]] -= 1
-    if any(value < 0 for value in remaining.values()):
+        subject_id = lesson["subject_id"]
+        teacher_id = lesson.get("teacher_id")
+        remaining[subject_id] -= 1
+        remaining_allocations[subject_id][teacher_id] -= 1
+    if any(value < 0 for value in remaining.values()) or any(
+        value < 0 for shares in remaining_allocations.values() for value in shares.values()
+    ):
         return False
 
     empty_slots = set(slots_for_grade(grade)) - set(class_lessons)
     nodes = 0
 
-    def available(subject_id: str, slot: str) -> bool:
-        if remaining[subject_id] <= 0 or not _subject_allowed(grade, subject_id, slot):
+    def available(subject_id: str, teacher_id: str | None, slot: str) -> bool:
+        if (
+            remaining[subject_id] <= 0
+            or remaining_allocations[subject_id][teacher_id] <= 0
+            or not _subject_allowed(grade, subject_id, slot)
+        ):
             return False
-        teacher_id = _teacher_for(assignments, class_id, subject_id)
         return not teacher_id or slot not in teacher_busy[teacher_id]
 
-    def candidates_for(slot: str) -> list[str]:
-        return [subject_id for subject_id in remaining if available(subject_id, slot)]
+    def candidates_for(slot: str) -> list[tuple[str, str | None]]:
+        return [
+            (subject_id, teacher_id)
+            for subject_id, shares in remaining_allocations.items()
+            for teacher_id, count in shares.items()
+            if count > 0 and available(subject_id, teacher_id, slot)
+        ]
 
     def forward_check() -> bool:
         core_slots = sum(
@@ -219,9 +265,24 @@ def _schedule_one_class(
         for subject_id, count in remaining.items():
             if count <= 0:
                 continue
-            possible = sum(1 for slot in empty_slots if available(subject_id, slot))
+            possible = sum(
+                1
+                for slot in empty_slots
+                if any(
+                    share_count > 0 and available(subject_id, teacher_id, slot)
+                    for teacher_id, share_count in remaining_allocations[subject_id].items()
+                )
+            )
             if possible < count:
                 return False
+            for teacher_id, share_count in remaining_allocations[subject_id].items():
+                if share_count <= 0:
+                    continue
+                teacher_possible = sum(
+                    1 for slot in empty_slots if available(subject_id, teacher_id, slot)
+                )
+                if teacher_possible < share_count:
+                    return False
         return True
 
     def search() -> bool:
@@ -235,7 +296,7 @@ def _schedule_one_class(
             return False
 
         selected_slot: str | None = None
-        selected_candidates: list[str] | None = None
+        selected_candidates: list[tuple[str, str | None]] | None = None
         selected_priority = 999
         for slot in empty_slots:
             candidates = candidates_for(slot)
@@ -250,14 +311,16 @@ def _schedule_one_class(
 
         assert selected_slot is not None and selected_candidates is not None
         selected_candidates.sort(
-            key=lambda subject_id: _candidate_score(grade, subject_id, selected_slot, class_lessons, rng),
+            key=lambda candidate: _candidate_score(
+                grade, candidate[0], selected_slot, class_lessons, rng
+            ),
             reverse=True,
         )
 
         empty_slots.remove(selected_slot)
-        for subject_id in selected_candidates:
-            teacher_id = _teacher_for(assignments, class_id, subject_id)
+        for subject_id, teacher_id in selected_candidates:
             remaining[subject_id] -= 1
+            remaining_allocations[subject_id][teacher_id] -= 1
             class_lessons[selected_slot] = _build_lesson(subject_id, teacher_id)
             if teacher_id:
                 teacher_busy[teacher_id].add(selected_slot)
@@ -269,19 +332,127 @@ def _schedule_one_class(
                 teacher_busy[teacher_id].remove(selected_slot)
             del class_lessons[selected_slot]
             remaining[subject_id] += 1
+            remaining_allocations[subject_id][teacher_id] += 1
         empty_slots.add(selected_slot)
         return False
 
     return search()
 
 
+def _slot_order(slot: str) -> tuple[int, int]:
+    meta = SLOT_META[slot]
+    return int(meta["day_index"]), int(meta["period_index"])
+
+
+def _best_interleaved_teacher_order(
+    slots: list[str],
+    original: list[str | None],
+    teacher_busy: dict[str, set[str]],
+) -> list[str | None]:
+    """Reorder fixed teacher quotas across a subject's slots without creating conflicts."""
+    remaining: Counter[str | None] = Counter(original)
+    candidate_order = list(dict.fromkeys(original))
+    best_cost = float("inf")
+    best_sequence: list[str | None] | None = None
+
+    def search(
+        index: int,
+        sequence: list[str | None],
+        last_seen: dict[str, int],
+        last_day: dict[str, int],
+        cost: float,
+    ) -> None:
+        nonlocal best_cost, best_sequence
+        if cost >= best_cost:
+            return
+        if index == len(slots):
+            best_cost = cost
+            best_sequence = list(sequence)
+            return
+
+        slot = slots[index]
+        day_index = int(SLOT_META[slot]["day_index"])
+        scored: list[tuple[float, str | None]] = []
+        for teacher_id in candidate_order:
+            if remaining[teacher_id] <= 0:
+                continue
+            if teacher_id and slot in teacher_busy.get(teacher_id, set()):
+                continue
+            added_cost = 0.2 if teacher_id != original[index] else 0.0
+            if teacher_id:
+                previous_index = last_seen.get(teacher_id)
+                if previous_index is not None:
+                    gap = index - previous_index
+                    if gap == 1:
+                        added_cost += 120
+                    elif gap == 2:
+                        added_cost += 25
+                if last_day.get(teacher_id) == day_index:
+                    added_cost += 45
+            scored.append((added_cost, teacher_id))
+
+        scored.sort(key=lambda item: (item[0], str(item[1] or "")))
+        for added_cost, teacher_id in scored:
+            remaining[teacher_id] -= 1
+            previous_seen = last_seen.get(teacher_id) if teacher_id else None
+            previous_day = last_day.get(teacher_id) if teacher_id else None
+            if teacher_id:
+                last_seen[teacher_id] = index
+                last_day[teacher_id] = day_index
+            sequence.append(teacher_id)
+            search(index + 1, sequence, last_seen, last_day, cost + added_cost)
+            sequence.pop()
+            if teacher_id:
+                if previous_seen is None:
+                    last_seen.pop(teacher_id, None)
+                else:
+                    last_seen[teacher_id] = previous_seen
+                if previous_day is None:
+                    last_day.pop(teacher_id, None)
+                else:
+                    last_day[teacher_id] = previous_day
+            remaining[teacher_id] += 1
+
+    search(0, [], {}, {}, 0.0)
+    return best_sequence or original
+
+
+def _interleave_shared_subject_teachers(
+    lessons: dict[str, dict[str, dict[str, Any]]]
+) -> None:
+    """Prefer alternating teachers for a shared subject while preserving all hard constraints."""
+    teacher_busy: dict[str, set[str]] = defaultdict(set)
+    for class_lessons in lessons.values():
+        for slot, lesson in class_lessons.items():
+            teacher_id = lesson.get("teacher_id")
+            if teacher_id:
+                teacher_busy[teacher_id].add(slot)
+
+    for class_lessons in lessons.values():
+        slots_by_subject: dict[str, list[str]] = defaultdict(list)
+        for slot, lesson in class_lessons.items():
+            slots_by_subject[lesson["subject_id"]].append(slot)
+        for subject_slots in slots_by_subject.values():
+            ordered_slots = sorted(subject_slots, key=_slot_order)
+            original = [class_lessons[slot].get("teacher_id") for slot in ordered_slots]
+            if len({teacher_id for teacher_id in original if teacher_id}) < 2:
+                continue
+            for slot, teacher_id in zip(ordered_slots, original):
+                if teacher_id:
+                    teacher_busy[teacher_id].discard(slot)
+            optimized = _best_interleaved_teacher_order(ordered_slots, original, teacher_busy)
+            for slot, teacher_id in zip(ordered_slots, optimized):
+                class_lessons[slot]["teacher_id"] = teacher_id
+                if teacher_id:
+                    teacher_busy[teacher_id].add(slot)
+
+
 def _class_difficulty(class_item: dict[str, Any], state: dict[str, Any], assigned_loads: dict[str, int]) -> int:
     score = 0
     class_assignments = state.get("assignments", {}).get(class_item["id"], {})
     for subject_id, hours in CURRICULUM[int(class_item["grade"])].items():
-        teacher_id = class_assignments.get(subject_id)
-        if teacher_id:
-            score += hours * assigned_loads.get(teacher_id, 0)
+        for allocation in normalize_allocations(class_assignments.get(subject_id), hours):
+            score += int(allocation["lessons"]) * assigned_loads.get(allocation["teacher_id"], 0)
     return score
 
 
@@ -299,15 +470,16 @@ def _build_warnings_and_quality(
     unassigned_lessons = 0
     for class_item in state.get("classes", []):
         for subject_id, hours in CURRICULUM[int(class_item["grade"])].items():
-            teacher_id = _teacher_for(assignments, class_item["id"], subject_id)
-            if not teacher_id:
+            allocations = _allocations_for(assignments, class_item["id"], subject_id, hours)
+            assigned = allocation_total(allocations)
+            if assigned < hours:
                 unassigned_pairs += 1
-                unassigned_lessons += hours
-                continue
-            if subject_id in SMALL_CLASS_SUBJECTS:
-                small_classes_by_teacher[teacher_id].add(class_item["id"])
-                small_subjects_by_teacher[teacher_id].add(subject_id)
-            shared_groups[(teacher_id, subject_id, int(class_item["grade"]))].append(class_item["name"])
+                unassigned_lessons += hours - assigned
+            for allocation in allocations:
+                if subject_id in SMALL_CLASS_SUBJECTS:
+                    small_classes_by_teacher[allocation["teacher_id"]].add(class_item["id"])
+                    small_subjects_by_teacher[allocation["teacher_id"]].add(subject_id)
+                shared_groups[(allocation["teacher_id"], subject_id, int(class_item["grade"]))].append(class_item["name"])
     if unassigned_pairs:
         warnings.append(
             f"有{unassigned_pairs}项班级课程（共{unassigned_lessons}节）尚未分配教师；这些课程未参与教师冲突校验。"
@@ -433,6 +605,7 @@ def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: 
                 break
 
         if solved:
+            _interleave_shared_subject_teachers(lessons)
             final_warnings, quality = _build_warnings_and_quality(working_state, lessons, warnings)
             return {
                 "success": True,

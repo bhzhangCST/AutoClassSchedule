@@ -7,7 +7,7 @@
   <meta name="description" content="高唐县民族实验小学课程安排与教师任课管理系统">
   <title>小学课程安排</title>
   <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260823-2">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260827-1">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -107,11 +107,11 @@
           <div class="section-intro"><div><h3>教师与任课</h3><p>集中维护教师、班主任和各班任课关系；阅读随语文教师、班队会随班主任自动设置。</p></div><div class="button-row"><a class="outline-button" href="/api/teachers/import-template.xlsx">下载导入模板</a><button class="outline-button" id="import-teachers-button">批量导入</button><button class="primary-button" id="add-teacher-button">添加教师</button></div></div>
           <div class="panel table-panel">
             <div class="table-toolbar"><label class="search-box"><span class="sr-only">搜索教师</span><input id="teacher-search" placeholder="搜索教师"></label><span class="muted" id="teacher-count-label"></span></div>
-            <div class="responsive-table"><table><thead><tr><th>教师</th><th>班主任</th><th>可任课程</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
+            <div class="responsive-table"><table><thead><tr><th>教师</th><th>班主任</th><th>任教学科</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
             <div class="empty-state" id="teacher-empty"><div class="empty-icon">师</div><h4>还没有教师信息</h4><p>添加教师后，即可为每个班级配置任课关系并检查时间冲突。</p></div>
           </div>
           <div class="subsection-divider"></div>
-          <div class="section-intro"><div><h3>按班级配置任课</h3><p>修改可以跨班暂存后统一保存。阅读和班队会为固定关联项，请分别修改语文教师和班主任。</p></div></div>
+          <div class="section-intro"><div><h3>按班级配置任课</h3><p>同一课程可按节数分给多位教师，修改可以跨班暂存后统一保存。阅读和班队会为自动关联项。</p></div></div>
           <div class="assignment-layout">
             <form id="assignment-form" class="panel assignment-panel">
               <div class="assignment-selector-bar">
@@ -169,10 +169,9 @@
       <label class="wide-field"><span>教师姓名</span><input id="teacher-name" maxlength="40" required></label>
       <label class="wide-field"><span>期望最低周课时</span><input id="teacher-min-lessons" type="number" min="0" max="35" value="12"><small>小课教师按至少12节检查；其他教师设为0可不检查</small></label>
       <label class="wide-field"><span>班主任班级</span><select id="teacher-homeroom-class"><option value="">不是班主任</option></select><small>每个班只能指定一名班主任；该班班队会将自动由此教师承担</small></label>
-      <fieldset><legend>可任课程</legend><div id="teacher-subject-options" class="subject-options"></div><small>任课配置中选到的科目会自动勾选，也可以补充其他可任课程</small></fieldset>
       <fieldset class="teacher-assignment-section">
         <legend>任课班级与科目</legend>
-        <p class="modal-description">按年级选择连续的班级范围和任教学科；同一教师可添加多条范围。</p>
+        <p class="modal-description">按年级选择连续班级范围、学科和每班承担节数。同一门课可以由多位教师按节数共同承担。</p>
         <div class="teacher-range-list" id="teacher-range-list"></div>
         <div class="teacher-range-footer"><button class="outline-button" id="add-teacher-range" type="button">添加任课范围</button><span class="teacher-range-status" id="teacher-range-status">尚未添加任课范围</span></div>
       </fieldset>
@@ -183,7 +182,7 @@
   <dialog id="teacher-import-dialog" class="modal">
     <form id="teacher-import-form">
       <div class="modal-heading"><div><p class="eyebrow">批量维护教师</p><h3>导入教师名单</h3></div><button class="icon-button" id="close-teacher-import-dialog" type="button" aria-label="关闭">×</button></div>
-      <p class="modal-description">模板可填写班主任班级和多个“班级：科目”任课关系，系统会从任课配置自动识别教师学科。与现有名单重名时更新，同一文件内重名会自动编号区分。</p>
+      <p class="modal-description">模板可填写“班级：科目(2节)”；不写节数表示承担该科全部课时。同一姓名的多行会合并为一位教师，课时数按行相加、任课配置合并。真实重名教师请在姓名中主动注明学科或编号；课时超标会拒绝导入，分配不足需再次确认。</p>
       <label class="file-upload-field" for="teacher-import-file"><span>选择教师名单</span><input id="teacher-import-file" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" required><small>最大 5MB。导入前会完整校验，存在无效行时不会写入。</small></label>
       <div class="import-result hidden" id="teacher-import-result" aria-live="polite"></div>
       <div class="modal-actions"><a class="ghost-button" href="/api/teachers/import-template.xlsx">下载模板</a><button class="ghost-button" id="cancel-teacher-import-dialog" type="button">取消</button><button class="primary-button" id="submit-teacher-import" type="submit">开始导入</button></div>
@@ -237,6 +236,6 @@
   </section>
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260823-2" defer></script>
+  <script src="/assets/app.js?v=20260827-1" defer></script>
 </body>
 </html>

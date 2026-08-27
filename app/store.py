@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from .assignment_rules import apply_required_teacher_assignments, normalize_teacher_records
 from .config import PROJECT_ROOT
 from .constants import CURRICULUM, GRADE_NAMES
+from .teaching_allocations import normalize_state_assignments
 
 DATA_DIR = Path(os.getenv("CLASSASSIGN_DATA_DIR", PROJECT_ROOT / "data"))
 STATE_FILE = DATA_DIR / "app_state.json"
@@ -38,13 +39,13 @@ def _default_classes(class_counts: dict[str, int] | None = None) -> list[dict[st
 def default_state() -> dict[str, Any]:
     classes = _default_classes()
     return {
-        "schema_version": 3,
+        "schema_version": 5,
         "school_name": "高唐县民族实验小学",
         "class_counts": {str(grade): DEFAULT_CLASS_COUNT for grade in range(1, 7)},
         "classes": classes,
         "teachers": [],
         "assignments": {
-            item["id"]: {subject_id: None for subject_id in CURRICULUM[item["grade"]]}
+            item["id"]: {subject_id: [] for subject_id in CURRICULUM[item["grade"]]}
             for item in classes
         },
         "schedule": None,
@@ -52,10 +53,11 @@ def default_state() -> dict[str, Any]:
 
 
 def normalize_state(state: dict[str, Any]) -> bool:
-    changed = int(state.get("schema_version", 0)) < 3
+    changed = int(state.get("schema_version", 0)) < 5
     if changed:
-        state["schema_version"] = 3
+        state["schema_version"] = 5
     changed = normalize_teacher_records(state) or changed
+    changed = normalize_state_assignments(state) or changed
     changed = apply_required_teacher_assignments(state) or changed
     if changed and state.get("schedule") is not None:
         state["schedule"] = None
