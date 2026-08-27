@@ -104,6 +104,10 @@ class AssignmentBatchPayload(BaseModel):
     classes: dict[str, dict[str, list[AssignmentAllocationPayload] | str | None]]
 
 
+class TeacherBulkDeletePayload(BaseModel):
+    teacher_ids: list[str] = Field(min_length=1, max_length=1000)
+
+
 class GeneratePayload(BaseModel):
     seed: int | None = None
     attempts: int = Field(default=80, ge=1, le=300)
@@ -437,21 +441,45 @@ def update_teacher(teacher_id: str, payload: TeacherPayload, _: dict[str, Any] =
     return _state_response()
 
 
+def _delete_teachers_from_state(state: dict[str, Any], teacher_ids: list[str]) -> int:
+    requested_ids = set(dict.fromkeys(teacher_ids))
+    existing_ids = {teacher["id"] for teacher in state["teachers"]}
+    missing_ids = requested_ids - existing_ids
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="部分教师不存在，请刷新页面后重试")
+
+    state["teachers"] = [item for item in state["teachers"] if item["id"] not in requested_ids]
+    classes_by_id = {item["id"]: item for item in state["classes"]}
+    for class_id, class_assignments in state["assignments"].items():
+        grade = int(classes_by_id[class_id]["grade"])
+        for subject_id, assigned_value in class_assignments.items():
+            total_lessons = CURRICULUM[grade][subject_id]
+            allocations = normalize_allocations(assigned_value, total_lessons)
+            class_assignments[subject_id] = [
+                allocation
+                for allocation in allocations
+                if allocation["teacher_id"] not in requested_ids
+            ]
+    apply_required_teacher_assignments(state)
+    state["schedule"] = None
+    return len(requested_ids)
+
+
+@app.post("/api/teachers/bulk-delete")
+def delete_teachers_bulk(
+    payload: TeacherBulkDeletePayload,
+    _: dict[str, Any] = Depends(require_auth),
+) -> dict[str, Any]:
+    state = store.load()
+    deleted = _delete_teachers_from_state(state, payload.teacher_ids)
+    store.save(state)
+    return {"deleted": deleted, **_state_response()}
+
+
 @app.delete("/api/teachers/{teacher_id}")
 def delete_teacher(teacher_id: str, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     state = store.load()
-    before = len(state["teachers"])
-    state["teachers"] = [item for item in state["teachers"] if item["id"] != teacher_id]
-    if len(state["teachers"]) == before:
-        raise HTTPException(status_code=404, detail="教师不存在")
-    classes_by_id = {item["id"]: item for item in state["classes"]}
-    for class_id, class_assignments in state["assignments"].items():
-        for subject_id, assigned_value in class_assignments.items():
-            class_assignments[subject_id] = remove_teacher(
-                assigned_value, teacher_id, CURRICULUM[int(classes_by_id[class_id]["grade"])][subject_id]
-            )
-    apply_required_teacher_assignments(state)
-    state["schedule"] = None
+    _delete_teachers_from_state(state, [teacher_id])
     store.save(state)
     return _state_response()
 
