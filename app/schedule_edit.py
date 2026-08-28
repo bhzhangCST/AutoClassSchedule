@@ -5,7 +5,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .constants import DAYS, PERIODS, SUBJECT_BY_ID, fixed_lessons_for_grade, slots_for_grade
-from .scheduler import SLOT_META, rebuild_schedule_analysis, subject_allowed
+from .scheduler import (
+    SLOT_META,
+    rebuild_schedule_analysis,
+    subject_allowed,
+    teacher_research_blocked_slots,
+)
 
 
 class ScheduleSwapError(ValueError):
@@ -27,6 +32,7 @@ def _validate_complete_schedule(state: dict[str, Any], lessons: dict[str, dict[s
     issues: list[str] = []
     teacher_names = {teacher["id"]: teacher["name"] for teacher in state.get("teachers", [])}
     teacher_owners: dict[tuple[str, str], list[str]] = {}
+    teacher_blocked_slots = teacher_research_blocked_slots(state)
 
     for class_item in state.get("classes", []):
         class_id = class_item["id"]
@@ -52,6 +58,10 @@ def _validate_complete_schedule(state: dict[str, Any], lessons: dict[str, dict[s
                 )
             teacher_id = lesson.get("teacher_id")
             if teacher_id:
+                if slot in teacher_blocked_slots.get(teacher_id, set()):
+                    issues.append(
+                        f"{teacher_names.get(teacher_id, '未知教师')}在{_slot_name(slot)}处于其语数英教研时段，不能安排任何课程"
+                    )
                 teacher_owners.setdefault((teacher_id, slot), []).append(class_item["name"])
 
     for (teacher_id, slot), class_names in teacher_owners.items():

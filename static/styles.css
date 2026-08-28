@@ -155,15 +155,23 @@ label span, .wide-field > span { display: block; margin-bottom: .5rem; color: #4
 
 .table-panel { overflow: hidden; }
 .table-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 1rem 1.15rem; border-bottom: 1px solid var(--line); }
+.teacher-toolbar-actions { display: flex; align-items: center; gap: .75rem; }
+.teacher-bulk-delete { min-height: 2.25rem; border-color: #ead4d5; background: #fff; }
+.teacher-bulk-delete:disabled { color: var(--muted); border-color: var(--line); background: var(--surface-muted); cursor: not-allowed; opacity: .7; }
 .search-box { display: flex; align-items: center; width: 15rem; color: var(--muted); font-size: 0; }
 .search-box input { height: 2.35rem; border: 0; background: var(--surface-muted); font-size: .8125rem; }
 .responsive-table { overflow-x: auto; }
-.table-panel .responsive-table table { min-width: 44rem; }
+.table-panel .responsive-table table { min-width: 47rem; }
 table { width: 100%; border-collapse: collapse; }
 th { padding: .8rem 1rem; color: var(--muted); background: #fafaf8; font-size: .7rem; font-weight: 600; text-align: left; white-space: nowrap; }
 td { padding: .9rem 1rem; border-top: 1px solid var(--line); font-size: .8125rem; vertical-align: middle; }
 tbody tr { transition: background-color 140ms ease; }
 tbody tr:hover { background: #fafaf8; }
+.teacher-row-selected, .teacher-row-selected:hover { background: #f3f6f1; }
+.teacher-select-column { width: 3rem; padding-right: .25rem; text-align: center; }
+.teacher-select-checkbox { width: 1rem; height: 1rem; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.teacher-select-checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.teacher-no-results td { padding: 2.1rem 1rem; color: var(--muted); text-align: center; }
 .action-column { width: 8rem; text-align: right; }
 .table-actions { display: flex; justify-content: flex-end; gap: .25rem; }
 .tiny-button { min-height: 1.95rem; padding: 0 .55rem; border: 1px solid transparent; border-radius: 4px; color: var(--accent); background: transparent; font-size: .75rem; }
@@ -173,6 +181,10 @@ tbody tr:hover { background: #fafaf8; }
 .subject-tags { display: flex; flex-wrap: wrap; gap: .35rem; }
 .subject-tag { display: inline-flex; padding: .25rem .5rem; border-radius: 999px; color: #566257; background: var(--accent-soft); font-size: .625rem; font-weight: 600; letter-spacing: .02em; }
 .teacher-name { font-weight: 600; }
+.table-pagination { display: flex; align-items: center; justify-content: space-between; min-height: 3.65rem; padding: .7rem 1.15rem; border-top: 1px solid var(--line); background: #fbfbfa; }
+.pagination-actions { display: flex; gap: .3rem; }
+.pagination-actions .tiny-button { border-color: var(--line); background: var(--surface); }
+.pagination-actions .tiny-button:disabled { color: #aaa7a0; background: transparent; cursor: not-allowed; }
 .subsection-divider { height: 1px; margin: 2.4rem 0 2rem; background: var(--line-strong); }
 
 .assignment-layout { display: block; }
@@ -399,6 +411,10 @@ tbody tr:hover { background: #fafaf8; }
   .metric-card { min-height: 7.5rem; padding: 1.15rem; }
   .metric-card strong { font-size: 1.55rem; }
   .section-intro { align-items: stretch; flex-direction: column; }
+  .table-toolbar { align-items: stretch; flex-direction: column; gap: .75rem; }
+  .table-toolbar .search-box { width: 100%; }
+  .teacher-toolbar-actions { justify-content: space-between; }
+  .table-pagination { align-items: flex-start; flex-direction: column; gap: .6rem; }
   .section-intro > button, .section-intro .button-row, .section-intro .button-row > * { width: 100%; }
   .assignment-selector-bar { grid-template-columns: 1fr; }
   .assignment-row { grid-template-columns: 1fr; }

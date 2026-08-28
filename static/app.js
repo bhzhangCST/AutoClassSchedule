@@ -12,6 +12,10 @@ let selectedSwapSlot = null;
 let pendingConfirm = null;
 let teacherAssignmentRanges = [];
 let nextTeacherAssignmentRangeId = 1;
+const TEACHERS_PER_PAGE = 10;
+const selectedTeacherIds = new Set();
+let currentTeacherPage = 1;
+let visibleTeacherIds = [];
 
 const pageNames = {
   overview: ["工作台", "工作概览"],
@@ -230,11 +234,24 @@ function renderTeachers(filter = document.getElementById("teacher-search")?.valu
   const classes = Object.fromEntries(appData.state.classes.map((item) => [item.id, item]));
   const loads = configuredTeacherLoads();
   const normalizedFilter = filter.trim().toLowerCase();
-  const teachers = appData.state.teachers.filter((teacher) => teacher.name.toLowerCase().includes(normalizedFilter));
-  document.getElementById("teacher-count-label").textContent = `共 ${appData.state.teachers.length} 名教师`;
+  const teacherIds = new Set(appData.state.teachers.map((teacher) => teacher.id));
+  Array.from(selectedTeacherIds).forEach((teacherId) => {
+    if (!teacherIds.has(teacherId)) selectedTeacherIds.delete(teacherId);
+  });
+  const filteredTeachers = appData.state.teachers.filter((teacher) => teacher.name.toLowerCase().includes(normalizedFilter));
+  const totalPages = Math.max(1, Math.ceil(filteredTeachers.length / TEACHERS_PER_PAGE));
+  currentTeacherPage = Math.min(Math.max(1, currentTeacherPage), totalPages);
+  const start = (currentTeacherPage - 1) * TEACHERS_PER_PAGE;
+  const teachers = filteredTeachers.slice(start, start + TEACHERS_PER_PAGE);
+  visibleTeacherIds = teachers.map((teacher) => teacher.id);
+  const selectedCount = selectedTeacherIds.size;
+  document.getElementById("teacher-count-label").textContent = selectedCount
+    ? `共 ${appData.state.teachers.length} 名 · 已选 ${selectedCount} 名`
+    : `共 ${appData.state.teachers.length} 名教师`;
   const body = document.getElementById("teacher-table-body");
-  body.innerHTML = teachers.map((teacher) => `
-    <tr>
+  body.innerHTML = teachers.length ? teachers.map((teacher) => `
+    <tr class="${selectedTeacherIds.has(teacher.id) ? "teacher-row-selected" : ""}">
+      <td class="teacher-select-column"><input class="teacher-select-checkbox" type="checkbox" data-select-teacher="${teacher.id}" aria-label="选择${escapeHtml(teacher.name)}" ${selectedTeacherIds.has(teacher.id) ? "checked" : ""}></td>
       <td><span class="teacher-name">${escapeHtml(teacher.name)}</span></td>
       <td>${teacher.homeroom_class_id ? `<span class="status-pill good">${escapeHtml(classes[teacher.homeroom_class_id]?.name || "班级已移除")}</span>` : '<span class="muted">—</span>'}</td>
       <td><div class="subject-tags">${teacher.subject_ids.length ? teacher.subject_ids.map((id) => `<span class="subject-tag">${escapeHtml(subjects[id]?.short || id)}</span>`).join("") : '<span class="muted">未限定课程</span>'}</div></td>
@@ -242,9 +259,29 @@ function renderTeachers(filter = document.getElementById("teacher-search")?.valu
       <td>${teacher.min_weekly_lessons ? `${teacher.min_weekly_lessons} 节` : "不检查"}</td>
       <td class="action-column"><div class="table-actions"><button class="tiny-button" data-edit-teacher="${teacher.id}">编辑</button><button class="tiny-button danger" data-delete-teacher="${teacher.id}">删除</button></div></td>
     </tr>
-  `).join("");
+  `).join("") : (appData.state.teachers.length ? '<tr class="teacher-no-results"><td colspan="7">没有找到符合条件的教师</td></tr>' : "");
   document.getElementById("teacher-empty").classList.toggle("hidden", appData.state.teachers.length > 0);
   body.closest(".responsive-table").classList.toggle("hidden", appData.state.teachers.length === 0);
+  const pageCheckbox = document.getElementById("teacher-select-page");
+  const pageSelectedCount = visibleTeacherIds.filter((teacherId) => selectedTeacherIds.has(teacherId)).length;
+  pageCheckbox.checked = visibleTeacherIds.length > 0 && pageSelectedCount === visibleTeacherIds.length;
+  pageCheckbox.indeterminate = pageSelectedCount > 0 && pageSelectedCount < visibleTeacherIds.length;
+  pageCheckbox.disabled = visibleTeacherIds.length === 0;
+  const bulkButton = document.getElementById("teacher-bulk-delete");
+  bulkButton.disabled = selectedCount === 0;
+  bulkButton.textContent = selectedCount ? `删除所选（${selectedCount}）` : "删除所选";
+  const pagination = document.getElementById("teacher-pagination");
+  pagination.classList.toggle("hidden", filteredTeachers.length === 0);
+  document.getElementById("teacher-page-summary").textContent = filteredTeachers.length
+    ? `第 ${currentTeacherPage} / ${totalPages} 页 · 显示 ${start + 1}—${start + teachers.length} 名`
+    : "";
+  document.getElementById("teacher-prev-page").disabled = currentTeacherPage <= 1;
+  document.getElementById("teacher-next-page").disabled = currentTeacherPage >= totalPages;
+  body.querySelectorAll("[data-select-teacher]").forEach((checkbox) => checkbox.addEventListener("change", () => {
+    if (checkbox.checked) selectedTeacherIds.add(checkbox.dataset.selectTeacher);
+    else selectedTeacherIds.delete(checkbox.dataset.selectTeacher);
+    renderTeachers();
+  }));
   body.querySelectorAll("[data-edit-teacher]").forEach((button) => button.addEventListener("click", () => openTeacherDialog(button.dataset.editTeacher)));
   body.querySelectorAll("[data-delete-teacher]").forEach((button) => button.addEventListener("click", () => deleteTeacher(button.dataset.deleteTeacher)));
 }
@@ -447,10 +484,47 @@ async function deleteTeacher(teacherId) {
   if (!confirmed) return;
   try {
     const data = await api(`/api/teachers/${teacherId}`, { method: "DELETE" });
+    selectedTeacherIds.delete(teacherId);
+    discardTeachersFromDrafts([teacherId]);
     applyStateResponse(data);
     showToast("教师已删除");
   } catch (error) {
     showToast(error.message, "error");
+  }
+}
+
+function discardTeachersFromDrafts(teacherIds) {
+  const deleted = new Set(teacherIds);
+  for (const [classId, draft] of assignmentDrafts.entries()) {
+    for (const [subjectId, allocations] of Object.entries(draft)) {
+      draft[subjectId] = (allocations || []).filter((allocation) => !deleted.has(allocation.teacher_id));
+    }
+    assignmentDrafts.set(classId, draft);
+  }
+}
+
+async function deleteSelectedTeachers() {
+  const teacherIds = Array.from(selectedTeacherIds).filter((teacherId) => appData.state.teachers.some((teacher) => teacher.id === teacherId));
+  if (!teacherIds.length) return;
+  const teacherNames = teacherIds
+    .map((teacherId) => appData.state.teachers.find((teacher) => teacher.id === teacherId)?.name)
+    .filter(Boolean);
+  const preview = teacherNames.slice(0, 5).join("、") + (teacherNames.length > 5 ? `等 ${teacherNames.length} 人` : "");
+  const confirmed = await confirmDialog("批量删除教师", `将删除${preview}，相关班级任课关系会变为未分配。此操作无法撤销。`, `删除 ${teacherIds.length} 名教师`);
+  if (!confirmed) return;
+  const button = document.getElementById("teacher-bulk-delete");
+  setLoading(button, true, "删除中…");
+  try {
+    const data = await api("/api/teachers/bulk-delete", { method: "POST", body: JSON.stringify({ teacher_ids: teacherIds }) });
+    discardTeachersFromDrafts(teacherIds);
+    selectedTeacherIds.clear();
+    applyStateResponse(data);
+    showToast(`已删除 ${teacherIds.length} 名教师`);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    setLoading(button, false);
+    renderTeachers();
   }
 }
 
@@ -1069,7 +1143,26 @@ document.getElementById("import-teachers-button").addEventListener("click", () =
   document.getElementById("teacher-import-result").classList.add("hidden");
   document.getElementById("teacher-import-dialog").showModal();
 });
-document.getElementById("teacher-search").addEventListener("input", (event) => renderTeachers(event.target.value));
+document.getElementById("teacher-search").addEventListener("input", (event) => {
+  currentTeacherPage = 1;
+  renderTeachers(event.target.value);
+});
+document.getElementById("teacher-select-page").addEventListener("change", (event) => {
+  visibleTeacherIds.forEach((teacherId) => {
+    if (event.target.checked) selectedTeacherIds.add(teacherId);
+    else selectedTeacherIds.delete(teacherId);
+  });
+  renderTeachers();
+});
+document.getElementById("teacher-bulk-delete").addEventListener("click", deleteSelectedTeachers);
+document.getElementById("teacher-prev-page").addEventListener("click", () => {
+  currentTeacherPage -= 1;
+  renderTeachers();
+});
+document.getElementById("teacher-next-page").addEventListener("click", () => {
+  currentTeacherPage += 1;
+  renderTeachers();
+});
 document.getElementById("close-teacher-dialog").addEventListener("click", () => document.getElementById("teacher-dialog").close());
 document.getElementById("cancel-teacher-dialog").addEventListener("click", () => document.getElementById("teacher-dialog").close());
 document.getElementById("add-teacher-range").addEventListener("click", () => {

@@ -7,7 +7,7 @@
   <meta name="description" content="高唐县民族实验小学课程安排与教师任课管理系统">
   <title>高唐县民族实验小学课程安排系统</title>
   <link rel="icon" href="/static/logo.jpg" type="image/jpeg">
-  <link rel="stylesheet" href="/assets/styles.css?v=20260827-1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260827-2">
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -106,8 +106,12 @@
         <section class="view" id="view-teachers" data-view-panel="teachers">
           <div class="section-intro"><div><h3>教师与任课</h3><p>集中维护教师、班主任和各班任课关系；阅读随语文教师、班队会随班主任自动设置。</p></div><div class="button-row"><a class="outline-button" href="/api/teachers/import-template.xlsx">下载导入模板</a><button class="outline-button" id="import-teachers-button">批量导入</button><button class="primary-button" id="add-teacher-button">添加教师</button></div></div>
           <div class="panel table-panel">
-            <div class="table-toolbar"><label class="search-box"><span class="sr-only">搜索教师</span><input id="teacher-search" placeholder="搜索教师"></label><span class="muted" id="teacher-count-label"></span></div>
-            <div class="responsive-table"><table><thead><tr><th>教师</th><th>班主任</th><th>任教学科</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
+            <div class="table-toolbar">
+              <label class="search-box"><span class="sr-only">搜索教师</span><input id="teacher-search" type="search" placeholder="搜索教师"></label>
+              <div class="teacher-toolbar-actions"><span class="muted" id="teacher-count-label"></span><button class="tiny-button danger teacher-bulk-delete" id="teacher-bulk-delete" type="button" disabled>删除所选</button></div>
+            </div>
+            <div class="responsive-table"><table><thead><tr><th class="teacher-select-column"><input class="teacher-select-checkbox" id="teacher-select-page" type="checkbox" aria-label="全选当前页教师"></th><th>教师</th><th>班主任</th><th>任教学科</th><th>已配置课时</th><th>期望最低</th><th class="action-column">操作</th></tr></thead><tbody id="teacher-table-body"></tbody></table></div>
+            <div class="table-pagination hidden" id="teacher-pagination"><span class="muted" id="teacher-page-summary"></span><div class="pagination-actions"><button class="tiny-button" id="teacher-prev-page" type="button">上一页</button><button class="tiny-button" id="teacher-next-page" type="button">下一页</button></div></div>
             <div class="empty-state" id="teacher-empty"><div class="empty-icon">师</div><h4>还没有教师信息</h4><p>添加教师后，即可为每个班级配置任课关系并检查时间冲突。</p></div>
           </div>
           <div class="subsection-divider"></div>
@@ -236,6 +240,6 @@
   </section>
 
   <div class="toast-container" id="toast-container" aria-live="polite"></div>
-  <script src="/assets/app.js?v=20260827-1" defer></script>
+  <script src="/assets/app.js?v=20260827-2" defer></script>
 </body>
 </html>
