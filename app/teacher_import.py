@@ -137,17 +137,37 @@ def _class_id(grade: int, number: int) -> str:
     return f"g{grade}c{number}"
 
 
+def _normalize_class_reference(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or ""))
+
+
+def _ambiguous_numeric_class_reference(value: Any) -> bool:
+    """Excel stores an unformatted 3.10 cell as 3.1, so the original class is unknowable."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and float(value) != int(float(value))
+    )
+
+
 def _resolve_class_reference(
     value: str,
-    classes_by_name: dict[str, dict[str, Any]],
+    classes_by_name: dict[str, list[dict[str, Any]]],
     classes_by_id: dict[str, dict[str, Any]],
     *,
     row_number: int,
     field_name: str,
     allow_range: bool,
 ) -> list[dict[str, Any]]:
-    text = re.sub(r"\s+", "", str(value or ""))
-    direct = classes_by_name.get(text) or classes_by_id.get(text)
+    text = _normalize_class_reference(value)
+    named_matches = classes_by_name.get(text, [])
+    if len(named_matches) > 1:
+        ids = "、".join(item["id"] for item in named_matches)
+        raise ValueError(
+            f"第{row_number}行{field_name}名称不唯一：{value}（对应{ids}）；"
+            "请填写数字简写或先在学校设置中区分班名"
+        )
+    direct = (named_matches[0] if named_matches else None) or classes_by_id.get(text)
     if direct:
         return [direct]
 
@@ -211,10 +231,10 @@ def parse_teacher_workbook(content: bytes) -> list[dict[str, Any]]:
         raise ValueError("无法读取该文件，请上传有效的 .xlsx 教师名单") from exc
 
     sheet = workbook["教师名单"] if "教师名单" in workbook.sheetnames else workbook.active
-    rows = list(islice(sheet.iter_rows(values_only=True), MAX_IMPORT_ROWS + 2))
+    rows = list(islice(sheet.iter_rows(values_only=False), MAX_IMPORT_ROWS + 2))
     if not rows:
         raise ValueError("教师名单中没有表头")
-    headers = list(rows[0])
+    headers = [cell.value for cell in rows[0]]
     name_index = _header_index(headers, NAME_HEADERS)
     lesson_index = _header_index(headers, LESSON_HEADERS)
     homeroom_flag_index = _header_index(headers, HOMEROOM_FLAG_HEADERS)
@@ -234,7 +254,7 @@ def parse_teacher_workbook(content: bytes) -> list[dict[str, Any]]:
     parsed: list[dict[str, Any]] = []
     errors: list[str] = []
     for row_number, row in enumerate(rows[1 : MAX_IMPORT_ROWS + 1], start=2):
-        values = list(row)
+        values = [cell.value for cell in row]
         if not any(index < len(values) and values[index] is not None and str(values[index]).strip() for index in present_indexes):
             continue
         name = str(values[name_index] or "").strip() if name_index is not None and name_index < len(values) else ""
@@ -257,10 +277,22 @@ def parse_teacher_workbook(content: bytes) -> list[dict[str, Any]]:
         except (TypeError, ValueError):
             errors.append(f"第{row_number}行课时数必须是0—35的整数")
             continue
+        raw_homeroom_class = (
+            values[homeroom_class_index]
+            if homeroom_class_index is not None and homeroom_class_index < len(values)
+            else None
+        )
+        if _ambiguous_numeric_class_reference(raw_homeroom_class):
+            errors.append(
+                f"第{row_number}行班主任班级被Excel保存为数值{raw_homeroom_class}，"
+                "无法判断末尾的0是否被删除；请填写完整班名（如三年级10班），"
+                "或先将单元格设为文本再填写3.10"
+            )
+            continue
         try:
             homeroom_specified, homeroom_class_name = _parse_homeroom(
                 values[homeroom_flag_index] if homeroom_flag_index is not None and homeroom_flag_index < len(values) else None,
-                values[homeroom_class_index] if homeroom_class_index is not None and homeroom_class_index < len(values) else None,
+                raw_homeroom_class,
                 row_number,
             )
             assignment_entries = _parse_assignment_entries(
@@ -293,7 +325,9 @@ def parse_teacher_workbook(content: bytes) -> list[dict[str, Any]]:
 def merge_teacher_rows(state: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
     teachers = state.setdefault("teachers", [])
     classes = state.get("classes", [])
-    classes_by_name = {item["name"].strip(): item for item in classes}
+    classes_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item in classes:
+        classes_by_name.setdefault(_normalize_class_reference(item["name"]), []).append(item)
     classes_by_id = {item["id"]: item for item in classes}
     assignment_claims: dict[tuple[str, str], list[dict[str, Any]]] = {}
     homeroom_claims: dict[str, str] = {}

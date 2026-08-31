@@ -376,7 +376,7 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
         "教师姓名\n（同名行合并）",
         "期望最低周课时\n（0—35整数；同名行相加）",
         "是否班主任\n（填“是”或“否”）",
-        "班主任班级\n（完整班名或1.1，不支持范围）",
+        "班主任班级\n（推荐完整班名；简写按文本填写）",
         "任课配置\n（班级/范围：科目(节数)；见填写说明）",
     ]
     assert all(
@@ -387,6 +387,8 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     )
     assert template_workbook["教师名单"]["A2"].border.right.style == "thin"
     assert template_workbook["教师名单"]["E2"].border.right.style == "thin"
+    assert template_workbook["教师名单"]["D2"].number_format == "@"
+    assert template_workbook["教师名单"]["E2"].number_format == "@"
     assert {str(item.sqref) for item in template_workbook["教师名单"].data_validations.dataValidation} == {
         "B2:B1001",
         "C2:C1001",
@@ -398,6 +400,9 @@ def test_teacher_template_and_batch_import(tmp_path, monkeypatch) -> None:
     assert "同一文件中姓名完全相同的多行自动合并为一位教师" in instructions
     assert "真实重名教师必须主动区分姓名" in instructions
     assert "同名三行分别填13、1、1，导入后该教师为15节" in instructions
+    assert "三年级10班" in instructions
+    assert "3.10" in instructions
+    assert "自动改成数值“3.1”" in instructions
     assert "主授" not in instructions
     assert template_workbook["填写说明"]["A9"].border.right.style == "thin"
 
@@ -502,6 +507,52 @@ def test_teacher_import_merges_repeated_name_rows_and_requires_manual_homonym_la
     rejected = client.post("/api/teachers/import", files={"file": ("conflict.xlsx", conflict)})
     assert rejected.status_code == 422
     assert "班主任信息不一致" in rejected.json()["detail"]
+
+
+def test_teacher_import_distinguishes_tenth_class_and_rejects_excel_numeric_ambiguity(tmp_path, monkeypatch) -> None:
+    local_store = StateStore(tmp_path / "state.json")
+    local_store.update_settings(
+        "测试学校",
+        {str(grade): (10 if grade == 3 else 6) for grade in range(1, 7)},
+    )
+    monkeypatch.setattr(main, "store", local_store)
+    client = TestClient(main.app)
+    _login(client)
+
+    exact = _teacher_import_file([
+        ["十班班主任", 0, "是", "3.10", "3.9-3.10：语文"],
+    ])
+    imported = client.post("/api/teachers/import", files={"file": ("exact.xlsx", exact)})
+    assert imported.status_code == 200, imported.text
+    teacher = next(item for item in imported.json()["state"]["teachers"] if item["name"] == "十班班主任")
+    assert teacher["homeroom_class_id"] == "g3c10"
+    assert _first_teacher_id(imported.json()["state"]["assignments"]["g3c9"]["chinese"]) == teacher["id"]
+    assert _first_teacher_id(imported.json()["state"]["assignments"]["g3c10"]["chinese"]) == teacher["id"]
+
+    ambiguous = _teacher_import_file([
+        ["数值简写教师", 0, "是", 3.10, "三年级10班：数学"],
+    ])
+    rejected = client.post("/api/teachers/import", files={"file": ("ambiguous.xlsx", ambiguous)})
+    assert rejected.status_code == 422
+    assert "被Excel保存为数值3.1" in rejected.json()["detail"]
+    assert "三年级10班" in rejected.json()["detail"]
+    assert all(item["name"] != "数值简写教师" for item in client.get("/api/state").json()["state"]["teachers"])
+
+
+def test_teacher_import_rejects_duplicate_custom_class_names(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
+    client = TestClient(main.app)
+    _login(client)
+    assert client.put("/api/classes/g3c1", json={"name": "同名班"}).status_code == 200
+    assert client.put("/api/classes/g3c2", json={"name": "同名班"}).status_code == 200
+
+    content = _teacher_import_file([
+        ["名称歧义教师", 0, "是", "同名班", "三年级1班：语文"],
+    ])
+    rejected = client.post("/api/teachers/import", files={"file": ("duplicate-name.xlsx", content)})
+    assert rejected.status_code == 422
+    assert "班主任班级名称不唯一" in rejected.json()["detail"]
+    assert "g3c1、g3c2" in rejected.json()["detail"]
 
 
 def test_teacher_import_supports_shared_lesson_quotas_and_strong_shortage_confirmation(tmp_path, monkeypatch) -> None:
