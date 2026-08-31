@@ -16,6 +16,7 @@ from .constants import (
     SMALL_CLASS_SUBJECTS,
     SUBJECT_BY_ID,
     fixed_lessons_for_grade,
+    reading_slot_pairs_for_grade,
     slots_for_grade,
 )
 from .teaching_allocations import allocation_total, normalize_allocations
@@ -88,6 +89,45 @@ def teacher_research_blocked_slots(state: dict[str, Any]) -> dict[str, set[str]]
     return {teacher_id: set(slots) for teacher_id, slots in blocked.items()}
 
 
+def mixed_core_minor_teacher_ids(state: dict[str, Any]) -> set[str]:
+    """Teachers who actually carry both a core course and another non-automatic course."""
+    subjects_by_teacher: dict[str, set[str]] = defaultdict(set)
+    assignments = state.get("assignments", {})
+    for class_item in state.get("classes", []):
+        class_id = class_item["id"]
+        grade = int(class_item["grade"])
+        for subject_id, total_lessons in CURRICULUM[grade].items():
+            if subject_id in {"reading", "meeting"}:
+                continue
+            for allocation in _allocations_for(assignments, class_id, subject_id, total_lessons):
+                subjects_by_teacher[allocation["teacher_id"]].add(subject_id)
+    return {
+        teacher_id
+        for teacher_id, subject_ids in subjects_by_teacher.items()
+        if subject_ids & CORE_SUBJECTS and subject_ids - CORE_SUBJECTS
+    }
+
+
+def _is_pressure_period(slot: str) -> bool:
+    period_id = SLOT_META[slot]["period_id"]
+    return period_id in {"am4", "pm3"}
+
+
+def _mixed_teacher_last_period_count(
+    state: dict[str, Any],
+    lessons: dict[str, dict[str, dict[str, Any]]],
+    mixed_teacher_ids: set[str] | None = None,
+) -> int:
+    mixed_ids = mixed_teacher_ids if mixed_teacher_ids is not None else mixed_core_minor_teacher_ids(state)
+    return sum(
+        1
+        for class_lessons in lessons.values()
+        for slot, lesson in class_lessons.items()
+        if lesson.get("teacher_id") in mixed_ids
+        and _is_pressure_period(slot)
+    )
+
+
 def _candidate_score(
     grade: int,
     subject_id: str,
@@ -95,6 +135,7 @@ def _candidate_score(
     slot: str,
     class_lessons: dict[str, dict[str, Any]],
     teacher_day_loads: dict[str, Counter[str]],
+    mixed_teacher_ids: set[str],
     rng: random.Random,
 ) -> float:
     meta = SLOT_META[slot]
@@ -121,6 +162,8 @@ def _candidate_score(
         score += 55 if same_day == 0 else -150 * same_day
 
     if teacher_id:
+        if teacher_id in mixed_teacher_ids and _is_pressure_period(slot):
+            score -= 190
         daily = teacher_day_loads[teacher_id]
         current_day_load = daily[day_id]
         lightest_day_load = min(daily[day] for day in DAY_IDS)
@@ -219,8 +262,9 @@ def _repair_soft_delta(
     class_lessons: dict[str, dict[str, Any]],
     left_slot: str,
     right_slot: str,
-) -> tuple[int, int]:
-    """Return changes in small-subject repeats and morning-third core count."""
+    mixed_teacher_ids: set[str],
+) -> tuple[int, int, int]:
+    """Return changes in repeats, morning-third core count and mixed-teacher last periods."""
     left_lesson = class_lessons[left_slot]
     right_lesson = class_lessons[right_slot]
     affected_subjects = {left_lesson["subject_id"], right_lesson["subject_id"]}
@@ -233,12 +277,24 @@ def _repair_soft_delta(
             and lesson["subject_id"] in CORE_SUBJECTS
         )
 
+    def mixed_last(slot: str, lesson: dict[str, Any]) -> int:
+        return int(
+            lesson.get("teacher_id") in mixed_teacher_ids
+            and _is_pressure_period(slot)
+        )
+
     before_third = third_core(left_slot, left_lesson) + third_core(right_slot, right_lesson)
+    before_mixed_last = mixed_last(left_slot, left_lesson) + mixed_last(right_slot, right_lesson)
     class_lessons[left_slot], class_lessons[right_slot] = right_lesson, left_lesson
     _, after_small = _subject_day_repeat_penalty(class_lessons, affected_subjects)
     after_third = third_core(left_slot, right_lesson) + third_core(right_slot, left_lesson)
+    after_mixed_last = mixed_last(left_slot, right_lesson) + mixed_last(right_slot, left_lesson)
     class_lessons[left_slot], class_lessons[right_slot] = left_lesson, right_lesson
-    return after_small - before_small, after_third - before_third
+    return (
+        after_small - before_small,
+        after_third - before_third,
+        after_mixed_last - before_mixed_last,
+    )
 
 
 def _repair_swap_allowed(
@@ -320,6 +376,7 @@ def _optimize_teacher_daily_balance(
 ) -> dict[str, int]:
     """Repair the globally worst teacher first with cross-period and two-step swaps."""
     classes_by_id = {class_item["id"]: class_item for class_item in state.get("classes", [])}
+    mixed_teacher_ids = mixed_core_minor_teacher_ids(state)
     fixed_slots_by_class = {
         class_id: set(fixed_lessons_for_grade(int(class_item["grade"])))
         for class_id, class_item in classes_by_id.items()
@@ -334,8 +391,100 @@ def _optimize_teacher_daily_balance(
                 busy_owner[(teacher_id, slot)] = class_id
     daily_loads = _teacher_day_loads(lessons)
     before_signature = _teacher_balance_signature_from_loads(daily_loads)
+    pressure_moves = 0
     direct_moves = 0
     chain_operations = 0
+
+    def find_pressure_relief_move() -> tuple[str, str, str] | None:
+        current_signature = _teacher_balance_signature_from_loads(daily_loads)
+        best_key: tuple[Any, ...] | None = None
+        best_move: tuple[str, str, str] | None = None
+        for class_id, class_lessons in lessons.items():
+            class_item = classes_by_id[class_id]
+            source_slots = [
+                slot
+                for slot, lesson in class_lessons.items()
+                if lesson.get("teacher_id") in mixed_teacher_ids
+                and _is_pressure_period(slot)
+            ]
+            for source_slot in source_slots:
+                for target_slot in class_lessons:
+                    if _is_pressure_period(target_slot):
+                        continue
+                    if not _repair_swap_allowed(
+                        class_item,
+                        class_lessons,
+                        fixed_slots_by_class[class_id],
+                        source_slot,
+                        target_slot,
+                        teacher_busy,
+                        teacher_blocked_slots,
+                    ):
+                        continue
+                    small_delta, third_delta, mixed_last_delta = _repair_soft_delta(
+                        class_item,
+                        class_lessons,
+                        source_slot,
+                        target_slot,
+                        mixed_teacher_ids,
+                    )
+                    if mixed_last_delta >= 0 or small_delta > 0 or third_delta < 0:
+                        continue
+                    _apply_repair_swap(
+                        class_id,
+                        class_lessons,
+                        source_slot,
+                        target_slot,
+                        teacher_busy,
+                        busy_owner,
+                        daily_loads,
+                    )
+                    candidate_signature = _teacher_balance_signature_from_loads(daily_loads)
+                    _apply_repair_swap(
+                        class_id,
+                        class_lessons,
+                        source_slot,
+                        target_slot,
+                        teacher_busy,
+                        busy_owner,
+                        daily_loads,
+                    )
+                    if candidate_signature > current_signature:
+                        continue
+                    same_day = (
+                        SLOT_META[source_slot]["day_id"]
+                        == SLOT_META[target_slot]["day_id"]
+                    )
+                    key = (
+                        candidate_signature,
+                        0 if same_day else 1,
+                        mixed_last_delta,
+                        small_delta,
+                        -third_delta,
+                        class_id,
+                        source_slot,
+                        target_slot,
+                    )
+                    if best_key is None or key < best_key:
+                        best_key = key
+                        best_move = (class_id, source_slot, target_slot)
+        return best_move
+
+    for _ in range(120):
+        pressure_move = find_pressure_relief_move()
+        if not pressure_move:
+            break
+        class_id, left_slot, right_slot = pressure_move
+        _apply_repair_swap(
+            class_id,
+            lessons[class_id],
+            left_slot,
+            right_slot,
+            teacher_busy,
+            busy_owner,
+            daily_loads,
+        )
+        pressure_moves += 1
 
     def teacher_order() -> list[str]:
         return sorted(
@@ -390,10 +539,10 @@ def _optimize_teacher_daily_balance(
                     teacher_blocked_slots,
                 ):
                     continue
-                small_delta, third_delta = _repair_soft_delta(
-                    class_item, class_lessons, source_slot, target_slot
+                small_delta, third_delta, mixed_last_delta = _repair_soft_delta(
+                    class_item, class_lessons, source_slot, target_slot, mixed_teacher_ids
                 )
-                if small_delta > 0 or third_delta < 0:
+                if small_delta > 0 or third_delta < 0 or mixed_last_delta > 0:
                     continue
                 _apply_repair_swap(
                     class_id,
@@ -417,7 +566,15 @@ def _optimize_teacher_daily_balance(
                 )
                 if after_teacher >= before_teacher or candidate_signature >= current_signature:
                     continue
-                key = (candidate_signature, small_delta, -third_delta, class_id, source_slot, target_slot)
+                key = (
+                    candidate_signature,
+                    mixed_last_delta,
+                    small_delta,
+                    -third_delta,
+                    class_id,
+                    source_slot,
+                    target_slot,
+                )
                 if best_key is None or key < best_key:
                     best_key = key
                     best_move = (class_id, source_slot, target_slot)
@@ -474,8 +631,12 @@ def _optimize_teacher_daily_balance(
                         teacher_blocked_slots,
                     ):
                         continue
-                    first_small, first_third = _repair_soft_delta(
-                        blocking_class, blocking_lessons, source_slot, release_slot
+                    first_small, first_third, first_mixed_last = _repair_soft_delta(
+                        blocking_class,
+                        blocking_lessons,
+                        source_slot,
+                        release_slot,
+                        mixed_teacher_ids,
                     )
                     _apply_repair_swap(
                         blocking_class_id,
@@ -496,8 +657,12 @@ def _optimize_teacher_daily_balance(
                         teacher_blocked_slots,
                     )
                     if second_allowed:
-                        second_small, second_third = _repair_soft_delta(
-                            target_class, target_lessons, source_slot, target_slot
+                        second_small, second_third, second_mixed_last = _repair_soft_delta(
+                            target_class,
+                            target_lessons,
+                            source_slot,
+                            target_slot,
+                            mixed_teacher_ids,
                         )
                         _apply_repair_swap(
                             target_class_id,
@@ -512,14 +677,17 @@ def _optimize_teacher_daily_balance(
                         candidate_signature = _teacher_balance_signature_from_loads(daily_loads)
                         final_small = first_small + second_small
                         final_third = first_third + second_third
+                        final_mixed_last = first_mixed_last + second_mixed_last
                         if (
                             after_teacher < before_teacher
                             and candidate_signature < current_signature
                             and final_small <= 0
                             and final_third >= 0
+                            and final_mixed_last <= 0
                         ):
                             key = (
                                 candidate_signature,
+                                final_mixed_last,
                                 final_small,
                                 -final_third,
                                 blocking_class_id,
@@ -590,9 +758,10 @@ def _optimize_teacher_daily_balance(
 
     after_signature = _teacher_balance_signature_from_loads(daily_loads)
     return {
+        "pressure_relief_swaps": pressure_moves,
         "direct_swaps": direct_moves,
         "chain_operations": chain_operations,
-        "applied_swaps": direct_moves + chain_operations * 2,
+        "applied_swaps": pressure_moves + direct_moves + chain_operations * 2,
         "before_max_penalty": before_signature[0],
         "after_max_penalty": after_signature[0],
         "before_total_penalty": before_signature[2],
@@ -649,6 +818,7 @@ def _validate_inputs(state: dict[str, Any]) -> tuple[list[str], list[str], dict[
 def _prepare_fixed_lessons(
     state: dict[str, Any],
     teacher_blocked_slots: dict[str, set[str]],
+    mixed_teacher_ids: set[str],
 ) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, set[str]], list[str]]:
     assignments = state.get("assignments", {})
     lessons: dict[str, dict[str, dict[str, Any]]] = {}
@@ -661,16 +831,15 @@ def _prepare_fixed_lessons(
         class_id = class_item["id"]
         lessons[class_id] = {}
         grade = int(class_item["grade"])
-        fixed_by_subject: dict[str, list[str]] = defaultdict(list)
-        for slot, subject_id in fixed_lessons_for_grade(grade).items():
-            fixed_by_subject[subject_id].append(slot)
-        for subject_id, fixed_slots in fixed_by_subject.items():
+
+        def fixed_plan(subject_id: str, fixed_slots: list[str] | tuple[str, ...]) -> list[tuple[str, str | None]]:
             total = CURRICULUM[grade][subject_id]
             allocations = _allocations_for(assignments, class_id, subject_id, total)
             remaining_teachers: Counter[str | None] = Counter({
                 item["teacher_id"]: int(item["lessons"]) for item in allocations
             })
             remaining_teachers[None] = total - allocation_total(allocations)
+            plan: list[tuple[str, str | None]] = []
             for slot in sorted(fixed_slots, key=lambda item: SLOT_META[item]["period_index"]):
                 candidates = [
                     teacher_id
@@ -680,10 +849,19 @@ def _prepare_fixed_lessons(
                 candidates.sort(key=lambda teacher_id: (
                     bool(teacher_id and slot in teacher_blocked_slots.get(teacher_id, set())),
                     bool(teacher_id and slot in teacher_busy[teacher_id]),
+                    bool(
+                        teacher_id in mixed_teacher_ids
+                        and _is_pressure_period(slot)
+                    ),
                     teacher_id or "",
                 ))
                 teacher_id = candidates[0] if candidates else None
                 remaining_teachers[teacher_id] -= 1
+                plan.append((slot, teacher_id))
+            return plan
+
+        def commit_fixed_plan(subject_id: str, plan: list[tuple[str, str | None]]) -> None:
+            for slot, teacher_id in plan:
                 lessons[class_id][slot] = _build_lesson(subject_id, teacher_id, fixed=True)
                 if teacher_id:
                     day_name = next(day["name"] for day in DAYS if day["id"] == SLOT_META[slot]["day_id"])
@@ -700,6 +878,42 @@ def _prepare_fixed_lessons(
                         )
                     teacher_busy[teacher_id].add(slot)
                     busy_owner[(teacher_id, slot)] = class_item["name"]
+
+        fixed_by_subject: dict[str, list[str]] = defaultdict(list)
+        for slot, subject_id in fixed_lessons_for_grade(grade).items():
+            fixed_by_subject[subject_id].append(slot)
+        for subject_id, fixed_slots in fixed_by_subject.items():
+            commit_fixed_plan(subject_id, fixed_plan(subject_id, fixed_slots))
+
+        reading_options: list[tuple[tuple[int, int, int, int], list[tuple[str, str | None]]]] = []
+        for pair_index, reading_slots in enumerate(reading_slot_pairs_for_grade(grade)):
+            plan = fixed_plan("reading", reading_slots)
+            hard_conflicts = sum(
+                int(
+                    bool(
+                        teacher_id
+                        and (
+                            slot in teacher_blocked_slots.get(teacher_id, set())
+                            or slot in teacher_busy[teacher_id]
+                        )
+                    )
+                )
+                for slot, teacher_id in plan
+            )
+            mixed_last = sum(
+                int(
+                    teacher_id in mixed_teacher_ids
+                    and _is_pressure_period(slot)
+                )
+                for slot, teacher_id in plan
+            )
+            any_last = sum(
+                int(_is_pressure_period(slot))
+                for slot, _teacher_id in plan
+            )
+            reading_options.append(((hard_conflicts, mixed_last, any_last, pair_index), plan))
+        _reading_key, reading_plan = min(reading_options, key=lambda item: item[0])
+        commit_fixed_plan("reading", reading_plan)
     return lessons, teacher_busy, conflicts
 
 
@@ -710,6 +924,7 @@ def _schedule_one_class(
     teacher_busy: dict[str, set[str]],
     teacher_blocked_slots: dict[str, set[str]],
     teacher_day_loads: dict[str, Counter[str]],
+    mixed_teacher_ids: set[str],
     rng: random.Random,
     node_limit: int = 180_000,
 ) -> bool:
@@ -802,17 +1017,18 @@ def _schedule_one_class(
 
         selected_slot: str | None = None
         selected_candidates: list[tuple[str, str | None]] | None = None
-        selected_priority = 999
+        selected_key: tuple[int, int, str] | None = None
         for slot in empty_slots:
             candidates = candidates_for(slot)
             if not candidates:
                 return False
             period = SLOT_META[slot]["period_id"]
             priority = 0 if period in {"am1", "am2"} else (1 if period == "am3" else 2)
-            if selected_candidates is None or (len(candidates), priority) < (len(selected_candidates), selected_priority):
+            candidate_key = (len(candidates), priority, slot)
+            if selected_key is None or candidate_key < selected_key:
                 selected_slot = slot
                 selected_candidates = candidates
-                selected_priority = priority
+                selected_key = candidate_key
 
         assert selected_slot is not None and selected_candidates is not None
         selected_candidates.sort(
@@ -823,6 +1039,7 @@ def _schedule_one_class(
                 selected_slot,
                 class_lessons,
                 teacher_day_loads,
+                mixed_teacher_ids,
                 rng,
             ),
             reverse=True,
@@ -864,6 +1081,7 @@ def _best_interleaved_teacher_order(
     teacher_busy: dict[str, set[str]],
     teacher_blocked_slots: dict[str, set[str]],
     teacher_day_loads: dict[str, Counter[str]],
+    mixed_teacher_ids: set[str],
 ) -> list[str | None]:
     """Reorder fixed teacher quotas across a subject's slots without creating conflicts."""
     remaining: Counter[str | None] = Counter(original)
@@ -898,6 +1116,8 @@ def _best_interleaved_teacher_order(
                 continue
             added_cost = 0.2 if teacher_id != original[index] else 0.0
             if teacher_id:
+                if teacher_id in mixed_teacher_ids and _is_pressure_period(slot):
+                    added_cost += 190
                 previous_index = last_seen.get(teacher_id)
                 if previous_index is not None:
                     gap = index - previous_index
@@ -942,6 +1162,7 @@ def _best_interleaved_teacher_order(
 def _interleave_shared_subject_teachers(
     lessons: dict[str, dict[str, dict[str, Any]]],
     teacher_blocked_slots: dict[str, set[str]],
+    mixed_teacher_ids: set[str],
 ) -> None:
     """Prefer alternating teachers for a shared subject while preserving all hard constraints."""
     teacher_busy: dict[str, set[str]] = defaultdict(set)
@@ -971,6 +1192,7 @@ def _interleave_shared_subject_teachers(
                 teacher_busy,
                 teacher_blocked_slots,
                 teacher_day_loads,
+                mixed_teacher_ids,
             )
             for slot, teacher_id in zip(ordered_slots, optimized):
                 class_lessons[slot]["teacher_id"] = teacher_id
@@ -1127,8 +1349,9 @@ def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: 
     apply_required_teacher_assignments(working_state)
     errors, warnings, assigned_loads = _validate_inputs(working_state)
     teacher_blocked_slots = teacher_research_blocked_slots(working_state)
+    mixed_teacher_ids = mixed_core_minor_teacher_ids(working_state)
     fixed_lessons, fixed_teacher_busy, fixed_conflicts = _prepare_fixed_lessons(
-        working_state, teacher_blocked_slots
+        working_state, teacher_blocked_slots, mixed_teacher_ids
     )
     errors.extend(fixed_conflicts)
     if errors:
@@ -1140,9 +1363,13 @@ def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: 
     best_lessons: dict[str, dict[str, dict[str, Any]]] | None = None
     best_attempt: int | None = None
     best_balance_signature = (10**9, 10**9, 10**9)
+    best_candidate_key = (10**9, 10**9, 10**9, 10**9)
     best_repair_stats: dict[str, int] | None = None
     solved_candidates = 0
     feasible_candidate_limit = min(attempts, min(8, max(3, attempts // 10 + 2)))
+    fixed_mixed_last_count = _mixed_teacher_last_period_count(
+        working_state, fixed_lessons, mixed_teacher_ids
+    )
 
     for attempt in range(1, attempts + 1):
         rng = random.Random(base_seed + attempt * 104_729)
@@ -1165,28 +1392,46 @@ def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: 
                 teacher_busy,
                 teacher_blocked_slots,
                 teacher_day_loads,
+                mixed_teacher_ids,
                 rng,
             ):
                 solved = False
                 break
 
         if solved:
-            _interleave_shared_subject_teachers(lessons, teacher_blocked_slots)
+            _interleave_shared_subject_teachers(
+                lessons,
+                teacher_blocked_slots,
+                mixed_teacher_ids,
+            )
             repair_stats = _optimize_teacher_daily_balance(
                 working_state, lessons, teacher_blocked_slots
             )
             balance_signature = _teacher_balance_signature_from_loads(
                 _teacher_day_loads(lessons)
             )
+            mixed_last_count = _mixed_teacher_last_period_count(
+                working_state, lessons, mixed_teacher_ids
+            )
+            candidate_key = (
+                balance_signature[0],
+                mixed_last_count,
+                balance_signature[1],
+                balance_signature[2],
+            )
             solved_candidates += 1
-            if balance_signature < best_balance_signature:
+            if candidate_key < best_candidate_key:
                 best_lessons = lessons
                 best_attempt = attempt
                 best_balance_signature = balance_signature
+                best_candidate_key = candidate_key
                 best_repair_stats = repair_stats
             # A zero signature is mathematically optimal. Otherwise compare more
             # feasible schedules while keeping runtime bounded for the server.
-            if balance_signature == (0, 0, 0) or solved_candidates >= feasible_candidate_limit:
+            if (
+                balance_signature == (0, 0, 0)
+                and mixed_last_count == fixed_mixed_last_count
+            ) or solved_candidates >= feasible_candidate_limit:
                 break
 
     if best_lessons is not None and best_attempt is not None:
@@ -1194,6 +1439,9 @@ def generate_schedule(state: dict[str, Any], seed: int | None = None, attempts: 
         quality["teacher_balance_repair"] = best_repair_stats or {}
         quality["feasible_candidates_compared"] = solved_candidates
         quality["teacher_daily_balance_max_penalty"] = best_balance_signature[0]
+        quality["mixed_core_minor_last_period_lessons"] = _mixed_teacher_last_period_count(
+            working_state, best_lessons, mixed_teacher_ids
+        )
         return {
             "success": True,
             "generated_at": datetime.now(timezone.utc).isoformat(),

@@ -4,7 +4,14 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 
-from .constants import DAYS, PERIODS, SUBJECT_BY_ID, fixed_lessons_for_grade, slots_for_grade
+from .constants import (
+    DAYS,
+    PERIODS,
+    SUBJECT_BY_ID,
+    fixed_lessons_for_grade,
+    reading_slot_pairs_for_grade,
+    slots_for_grade,
+)
 from .scheduler import (
     SLOT_META,
     rebuild_schedule_analysis,
@@ -46,6 +53,19 @@ def _validate_complete_schedule(state: dict[str, Any], lessons: dict[str, dict[s
         for slot, fixed_subject in fixed_lessons_for_grade(grade).items():
             if class_lessons.get(slot, {}).get("subject_id") != fixed_subject:
                 issues.append(f"{class_item['name']}的{_slot_name(slot)}是固定课位，不能更改")
+
+        reading_slots = tuple(sorted(
+            (
+                slot
+                for slot, lesson in class_lessons.items()
+                if lesson.get("subject_id") == "reading"
+            ),
+            key=lambda slot: SLOT_META[slot]["period_index"],
+        ))
+        valid_reading_pairs = set(reading_slot_pairs_for_grade(grade))
+        if reading_slots not in valid_reading_pairs:
+            day_name = "星期三" if grade <= 2 else "星期四"
+            issues.append(f"{class_item['name']}的阅读课必须安排在{day_name}下午连续两节")
 
         for slot, lesson in class_lessons.items():
             subject_id = lesson.get("subject_id")

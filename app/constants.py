@@ -57,8 +57,8 @@ GRADE_NAMES = {1: "一年级", 2: "二年级", 3: "三年级", 4: "四年级", 5
 
 RULE_DESCRIPTIONS = [
     {"level": "hard", "title": "班会固定", "detail": "1—6年级每周一下午第3节安排班队会（安全课）；已配置班主任时由班主任承担，否则教师留空。"},
-    {"level": "hard", "title": "低年级阅读", "detail": "1—2年级每周三下午后两节安排阅读连堂；已配置语文教师时由语文教师承担，否则教师留空。"},
-    {"level": "hard", "title": "中高年级阅读", "detail": "3—6年级每周四下午后两节安排阅读连堂；已配置语文教师时由语文教师承担，否则教师留空。"},
+    {"level": "hard", "title": "低年级阅读", "detail": "1—2年级每周三下午安排两节阅读连堂，可使用前两节或后两节；已配置语文教师时由语文教师承担，否则教师留空。"},
+    {"level": "hard", "title": "中高年级阅读", "detail": "3—6年级每周四下午安排两节阅读连堂，可使用前两节或后两节；已配置语文教师时由语文教师承担，否则教师留空。"},
     {"level": "hard", "title": "趣味课堂", "detail": "3—6年级每周三下午前两节安排趣味课堂。"},
     {"level": "hard", "title": "教研避让", "detail": "承担英语、语文、数学的教师，分别在周一、周二、周四下午前两节不得安排任何课程（含兼任小课）。"},
     {"level": "hard", "title": "上午核心课", "detail": "每天上午前两节只安排语数英；1—2年级只安排语数。"},
@@ -66,7 +66,8 @@ RULE_DESCRIPTIONS = [
     {"level": "soft", "title": "上午第3节优先", "detail": "3—6年级上午第3节尽量安排语数英。"},
     {"level": "soft", "title": "副科跨天分散", "detail": "体育、音乐、美术、科学等每周多于1节的副科尽量安排在不同日期，避免同一天重复。"},
     {"level": "soft", "title": "教师课时均衡", "detail": "教师承担的全部课程按周一至周五合并计算，尽量均匀分布，避免单日过密或整日无课。"},
-    {"level": "soft", "title": "小课教师任课量", "detail": "音体美、道法、科学、地方、劳动、信息教师尽量承担6—12个班，周课时不少于12节；不足或超出时生成警告。"},
+    {"level": "soft", "title": "兼课教师末节减压", "detail": "同时承担语数英和其他课程的教师，尽量避开上午第4节、下午第3节；遇固定课位或教师冲突时允许安排。"},
+    {"level": "soft", "title": "小课教师任课量", "detail": "音体美、道法、科学、地方、劳动、信息教师的任课班级数和周课时仅作配置参考统计。"},
     {"level": "soft", "title": "教师工作量", "detail": "教师最低周课时尽量达到配置值；不足时生成警告，不阻止排课。"},
 ]
 
@@ -90,12 +91,15 @@ def slots_for_grade(grade: int) -> list[str]:
 
 def fixed_lessons_for_grade(grade: int) -> dict[str, str]:
     fixed = {slot_key("mon", "pm3"): "meeting"}
-    if grade <= 2:
-        fixed[slot_key("wed", "pm2")] = "reading"
-        fixed[slot_key("wed", "pm3")] = "reading"
-    else:
+    if grade >= 3:
         fixed[slot_key("wed", "pm1")] = "fun"
         fixed[slot_key("wed", "pm2")] = "fun"
-        fixed[slot_key("thu", "pm2")] = "reading"
-        fixed[slot_key("thu", "pm3")] = "reading"
     return fixed
+
+
+def reading_slot_pairs_for_grade(grade: int) -> list[tuple[str, str]]:
+    day_id = "wed" if grade <= 2 else "thu"
+    return [
+        (slot_key(day_id, "pm1"), slot_key(day_id, "pm2")),
+        (slot_key(day_id, "pm2"), slot_key(day_id, "pm3")),
+    ]
