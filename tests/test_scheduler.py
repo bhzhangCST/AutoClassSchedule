@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from collections import Counter, defaultdict
 
 from app.assignment_rules import apply_required_teacher_assignments
@@ -16,9 +17,15 @@ from app.schedule_edit import ScheduleSwapError, apply_schedule_swaps
 from app.scheduler import (
     RESEARCH_SLOTS_BY_SUBJECT,
     SLOT_META,
+    _candidate_score,
+    _mixed_teacher_last_period_count,
     _optimize_teacher_daily_balance,
+    _prepare_fixed_lessons,
+    _teacher_consecutive_signature,
     _teacher_daily_balance_penalty,
     generate_schedule,
+    mixed_core_minor_teacher_ids,
+    teacher_research_blocked_slots,
 )
 from app.store import default_state, normalize_state
 
@@ -116,9 +123,11 @@ def test_schedule_allows_missing_chinese_teacher_and_homeroom() -> None:
 
     assert result["success"], result.get("errors")
     lessons = result["lessons"]["g1c1"]
-    assert lessons["wed-pm1"]["subject_id"] == "reading"
-    assert lessons["wed-pm2"]["subject_id"] == "reading"
-    assert lessons["wed-pm1"]["teacher_id"] is None
+    reading_slots = {
+        slot for slot, lesson in lessons.items() if lesson["subject_id"] == "reading"
+    }
+    assert reading_slots in ({"wed-pm1", "wed-pm2"}, {"wed-pm2", "wed-pm3"})
+    assert all(lessons[slot]["teacher_id"] is None for slot in reading_slots)
     assert lessons["mon-pm3"]["subject_id"] == "meeting"
     assert lessons["mon-pm3"]["teacher_id"] is None
 
@@ -252,18 +261,30 @@ def test_reading_and_meeting_follow_required_teachers() -> None:
     result = generate_schedule(state, seed=77, attempts=20)
     assert result["success"], result.get("errors")
     lessons = result["lessons"]["g1c1"]
-    assert lessons["wed-pm1"]["teacher_id"] == required_teacher
-    assert lessons["wed-pm2"]["teacher_id"] == required_teacher
+    reading_slots = {
+        slot for slot, lesson in lessons.items() if lesson["subject_id"] == "reading"
+    }
+    assert reading_slots in ({"wed-pm1", "wed-pm2"}, {"wed-pm2", "wed-pm3"})
+    assert all(lessons[slot]["teacher_id"] == required_teacher for slot in reading_slots)
     assert lessons["mon-pm3"]["teacher_id"] == required_teacher
 
     state["schedule"] = result
+    from_slot, to_slot = (
+        ("wed-pm1", "wed-pm3")
+        if "wed-pm1" in reading_slots
+        else ("wed-pm3", "wed-pm1")
+    )
     edited = apply_schedule_swaps(
         state,
         "g1c1",
-        [{"from_slot": "wed-pm1", "to_slot": "wed-pm3"}],
+        [{"from_slot": from_slot, "to_slot": to_slot}],
     )
-    assert edited["lessons"]["g1c1"]["wed-pm2"]["subject_id"] == "reading"
-    assert edited["lessons"]["g1c1"]["wed-pm3"]["subject_id"] == "reading"
+    swapped_reading_slots = {
+        slot
+        for slot, lesson in edited["lessons"]["g1c1"].items()
+        if lesson["subject_id"] == "reading"
+    }
+    assert swapped_reading_slots == ({"wed-pm2", "wed-pm3"} if to_slot == "wed-pm3" else {"wed-pm1", "wed-pm2"})
 
 
 def test_core_teacher_with_minor_courses_avoids_each_half_day_last_period() -> None:
@@ -290,10 +311,90 @@ def test_core_teacher_with_minor_courses_avoids_each_half_day_last_period() -> N
             slot
             for slot, lesson in result["lessons"][class_id].items()
             if lesson.get("teacher_id") == "t_mixed"
+            and lesson["subject_id"] != "reading"
             and SLOT_META[slot]["period_id"] in forbidden_periods
         ]
         assert mixed_last_slots == []
         assert result["quality"]["mixed_core_minor_last_period_lessons"] == 0
+
+
+def test_reading_can_use_the_later_double_period_without_mixed_teacher_penalty() -> None:
+    state = default_state()
+    class_item = next(item for item in state["classes"] if item["id"] == "g1c1")
+    state["classes"] = [class_item]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+    state["teachers"] = [{
+        "id": "t_chinese_morality",
+        "name": "语文兼道法教师",
+        "subject_ids": ["chinese", "morality"],
+        "min_weekly_lessons": 0,
+        "homeroom_class_id": None,
+    }]
+    state["assignments"]["g1c1"]["chinese"] = "t_chinese_morality"
+    state["assignments"]["g1c1"]["morality"] = "t_chinese_morality"
+    apply_required_teacher_assignments(state)
+    mixed_ids = mixed_core_minor_teacher_ids(state)
+
+    fixed_lessons, _teacher_busy, conflicts = _prepare_fixed_lessons(
+        state,
+        teacher_research_blocked_slots(state),
+        mixed_ids,
+        {1: 1},
+    )
+
+    assert conflicts == []
+    reading_slots = {
+        slot
+        for slot, lesson in fixed_lessons["g1c1"].items()
+        if lesson["subject_id"] == "reading"
+    }
+    assert reading_slots == {"wed-pm2", "wed-pm3"}
+    assert _mixed_teacher_last_period_count(state, fixed_lessons, mixed_ids) == 0
+
+
+def test_candidate_score_strongly_avoids_a_third_consecutive_lesson() -> None:
+    class_lessons = {
+        "thu-pm1": {"subject_id": "reading", "teacher_id": "t_mixed", "fixed": True},
+        "thu-pm2": {"subject_id": "reading", "teacher_id": "t_mixed", "fixed": True},
+    }
+    teacher_busy = defaultdict(set, {"t_mixed": {"thu-pm1", "thu-pm2"}})
+    teacher_day_loads = defaultdict(Counter)
+    teacher_day_loads["t_mixed"]["thu"] = 2
+    mixed_ids = {"t_mixed"}
+
+    consecutive_score = _candidate_score(
+        3, "morality", "t_mixed", "thu-pm3", class_lessons,
+        teacher_busy, teacher_day_loads, mixed_ids, random.Random(17),
+    )
+    separated_score = _candidate_score(
+        3, "morality", "t_mixed", "thu-am4", class_lessons,
+        teacher_busy, teacher_day_loads, mixed_ids, random.Random(17),
+    )
+
+    assert separated_score - consecutive_score > 240
+
+
+def test_generated_schedule_avoids_three_consecutive_lessons_when_feasible() -> None:
+    state = default_state()
+    class_item = next(item for item in state["classes"] if item["id"] == "g1c1")
+    state["classes"] = [class_item]
+    state["assignments"] = {"g1c1": state["assignments"]["g1c1"]}
+    state["teachers"] = [{
+        "id": "t_mixed",
+        "name": "语文兼道法教师",
+        "subject_ids": ["chinese", "morality"],
+        "min_weekly_lessons": 0,
+        "homeroom_class_id": None,
+    }]
+    state["assignments"]["g1c1"]["chinese"] = "t_mixed"
+    state["assignments"]["g1c1"]["morality"] = "t_mixed"
+    apply_required_teacher_assignments(state)
+
+    result = generate_schedule(state, seed=20260831, attempts=30)
+
+    assert result["success"], result.get("errors")
+    assert _teacher_consecutive_signature(result["lessons"]) == (0, 0, 0)
+    assert result["quality"]["teacher_consecutive_signature"] == [0, 0, 0]
 
 
 def test_one_subject_can_be_split_between_multiple_teachers_by_exact_lesson_count() -> None:
@@ -433,7 +534,7 @@ def test_global_balance_repair_can_swap_across_periods() -> None:
         if lesson.get("teacher_id") == "t_mix"
     )
     assert sorted(daily[day["id"]] for day in DAYS) == [2, 2, 2, 3, 3]
-    assert stats["direct_swaps"] >= 1
+    assert stats["direct_swaps"] + stats["consecutive_relief_swaps"] >= 1
     assert stats["before_total_penalty"] == 2
     assert stats["after_total_penalty"] == 0
     assert {
