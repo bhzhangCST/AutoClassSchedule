@@ -16,6 +16,8 @@ const TEACHERS_PER_PAGE = 10;
 const selectedTeacherIds = new Set();
 let currentTeacherPage = 1;
 let visibleTeacherIds = [];
+let scheduleGenerationJob = null;
+let scheduleGenerationPollHandle = null;
 
 const pageNames = {
   overview: ["工作台", "工作概览"],
@@ -57,6 +59,9 @@ async function api(path, options = {}) {
 }
 
 function showLogin() {
+  if (scheduleGenerationPollHandle) window.clearTimeout(scheduleGenerationPollHandle);
+  scheduleGenerationPollHandle = null;
+  scheduleGenerationJob = null;
   document.getElementById("login-screen").classList.remove("hidden");
   document.getElementById("app-shell").classList.add("hidden");
 }
@@ -670,6 +675,66 @@ function renderGenerationMessage(result = appData.state.schedule) {
   container.innerHTML = `<div class="message-panel ${warnings.length ? "warning" : "success"}"><h4>课表生成成功 · 上午第3节核心课比例 ${rate}%</h4>${warnings.length ? `<details class="warning-details"><summary>查看 ${warnings.length} 条生成说明</summary><ul>${warnings.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></details>` : "<span>所有已配置的硬性约束均已满足，未发现生成后警告。</span>"}</div>`;
 }
 
+function generationIsActive() {
+  return ["queued", "running"].includes(scheduleGenerationJob?.status);
+}
+
+function renderGenerationActivity() {
+  const button = document.getElementById("generate-button");
+  if (!generationIsActive()) {
+    button.textContent = "生成新课表";
+    renderGenerationMessage(appData.state.schedule);
+    return;
+  }
+  const started = new Date(scheduleGenerationJob.started_at || scheduleGenerationJob.created_at).getTime();
+  const elapsedSeconds = Number.isFinite(started) ? Math.max(0, Math.floor((Date.now() - started) / 1000)) : 0;
+  button.textContent = "正在排课…";
+  document.getElementById("generation-message").innerHTML = `<div class="message-panel success"><h4>正在后台编排课表</h4><span>已运行约 ${elapsedSeconds} 秒。可以停留在本页，也可以刷新页面，完成后会自动显示结果。</span></div>`;
+}
+
+function queueGenerationPoll(delay = 1000) {
+  if (scheduleGenerationPollHandle) window.clearTimeout(scheduleGenerationPollHandle);
+  scheduleGenerationPollHandle = window.setTimeout(() => refreshGenerationStatus(true), delay);
+}
+
+async function refreshGenerationStatus(notifyOnCompletion = false) {
+  try {
+    const data = await api("/api/schedule/generation");
+    scheduleGenerationJob = data.job;
+    if (generationIsActive()) {
+      renderSchedule();
+      queueGenerationPoll();
+      return;
+    }
+
+    scheduleGenerationPollHandle = null;
+    if (!scheduleGenerationJob) {
+      renderSchedule();
+      return;
+    }
+    if (data.state && data.meta) {
+      appData = { state: data.state, meta: data.meta };
+    } else {
+      await loadState();
+    }
+    renderAll();
+    if (scheduleGenerationJob.status === "error") {
+      renderGenerationMessage({ success: false, errors: [scheduleGenerationJob.error || "排课任务执行失败"] });
+      if (notifyOnCompletion) showToast(scheduleGenerationJob.error || "排课任务执行失败", "error");
+      return;
+    }
+    renderGenerationMessage(scheduleGenerationJob.result);
+    if (notifyOnCompletion) {
+      const succeeded = Boolean(scheduleGenerationJob.result?.success);
+      showToast(succeeded ? "课表生成成功" : "未找到可行课表", succeeded ? "success" : "error");
+    }
+  } catch (error) {
+    if (!generationIsActive()) return;
+    document.getElementById("generation-message").innerHTML = `<div class="message-panel warning"><h4>排课仍在后台运行</h4><span>暂时无法取得任务状态，系统将在片刻后重试。${escapeHtml(error.message)}</span></div>`;
+    queueGenerationPoll(2000);
+  }
+}
+
 function renderSchedule() {
   if (!appData.state) return;
   const schedule = appData.state.schedule;
@@ -684,9 +749,9 @@ function renderSchedule() {
   teacherExportButton.classList.toggle("disabled", !schedule?.success || editing);
   exportButton.disabled = !schedule?.success || editing;
   teacherExportButton.disabled = !schedule?.success || editing;
-  document.getElementById("generate-button").disabled = editing;
+  document.getElementById("generate-button").disabled = editing || generationIsActive();
   renderClassExportFilters();
-  renderGenerationMessage(schedule);
+  renderGenerationActivity();
   document.querySelectorAll("[data-schedule-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.scheduleMode === scheduleMode);
     button.disabled = editing;
@@ -716,7 +781,7 @@ function renderSchedule() {
   selector.disabled = editing;
   const editButton = document.getElementById("schedule-edit-button");
   editButton.classList.toggle("hidden", scheduleMode !== "class" || editing);
-  editButton.disabled = !schedule?.success || !selector.value;
+  editButton.disabled = !schedule?.success || !selector.value || generationIsActive();
   renderScheduleEditControls();
   renderTimetable();
 }
@@ -1398,24 +1463,19 @@ window.addEventListener("beforeunload", (event) => {
 });
 
 document.getElementById("generate-button").addEventListener("click", async () => {
-  const button = document.getElementById("generate-button");
   const seedValue = document.getElementById("schedule-seed").value;
-  setLoading(button, true, "正在排课…");
-  document.getElementById("generation-message").innerHTML = '<div class="message-panel success"><h4>正在搜索可行课表</h4><span>会尝试不同组合，请稍候…</span></div>';
   try {
     const data = await api("/api/schedule/generate", {
       method: "POST",
       body: JSON.stringify({ seed: seedValue ? Number(seedValue) : null, attempts: Number(document.getElementById("schedule-attempts").value || 80) }),
     });
-    appData = { state: data.state, meta: data.meta };
-    renderAll();
-    renderGenerationMessage(data.result);
-    showToast(data.result.success ? "课表生成成功" : "未找到可行课表", data.result.success ? "success" : "error");
+    scheduleGenerationJob = data.job;
+    renderSchedule();
+    queueGenerationPoll(250);
+    if (data.already_running) showToast("已有排课任务正在运行，已继续查询其进度");
   } catch (error) {
     showToast(error.message, "error");
     renderGenerationMessage({ success: false, errors: [error.message] });
-  } finally {
-    setLoading(button, false);
   }
 });
 
@@ -1492,6 +1552,7 @@ async function bootstrap() {
     if (!me.authenticated) throw new Error("尚未登录");
     showApp(me.username);
     await loadState();
+    await refreshGenerationStatus(false);
   } catch {
     showLogin();
   }

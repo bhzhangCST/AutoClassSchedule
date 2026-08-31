@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -29,6 +31,22 @@ def _first_teacher_id(value: list[dict]) -> str | None:
 def _login(client: TestClient) -> None:
     response = client.post("/api/auth/login", json={"username": "test-admin", "password": "test-password-only"})
     assert response.status_code == 200
+
+
+def _generate_and_wait(client: TestClient, payload: dict, timeout: float = 30.0) -> dict:
+    started = client.post("/api/schedule/generate", json=payload)
+    assert started.status_code == 202, started.text
+    job_id = started.json()["job"]["id"]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status_response = client.get("/api/schedule/generation")
+        assert status_response.status_code == 200, status_response.text
+        data = status_response.json()
+        assert data["job"]["id"] == job_id
+        if data["job"]["status"] in {"completed", "error"}:
+            return data
+        time.sleep(0.01)
+    raise AssertionError(f"排课任务 {job_id} 未在 {timeout} 秒内完成")
 
 
 def _teacher_import_file(rows: list[list[object]]) -> bytes:
@@ -88,9 +106,9 @@ def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
     assert len(state.json()["state"]["classes"]) == 36
     assert set(state.json()["state"]["class_counts"].values()) == {6}
 
-    generated = client.post("/api/schedule/generate", json={"seed": 202508, "attempts": 12})
-    assert generated.status_code == 200
-    assert generated.json()["result"]["success"]
+    generated = _generate_and_wait(client, {"seed": 202508, "attempts": 12})
+    assert generated["job"]["status"] == "completed"
+    assert generated["job"]["result"]["success"]
 
     exported = client.get("/api/export/schedule.pdf")
     assert exported.status_code == 200
@@ -128,6 +146,45 @@ def test_login_state_generate_and_export(tmp_path, monkeypatch) -> None:
     assert all(cell.fill.fill_type is None for row in first_class_sheet.iter_rows() for cell in row)
 
 
+def test_schedule_generation_runs_in_background_and_deduplicates_clicks(tmp_path, monkeypatch) -> None:
+    local_store = StateStore(tmp_path / "state.json")
+    monkeypatch.setattr(main, "store", local_store)
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    def slow_generation(_state: dict, seed: int | None = None, attempts: int = 80) -> dict:
+        worker_started.set()
+        release_worker.wait(5)
+        return {"success": False, "seed": seed, "attempts": attempts, "errors": ["测试结束"], "warnings": []}
+
+    monkeypatch.setattr(main, "generate_schedule", slow_generation)
+    client = TestClient(main.app)
+    _login(client)
+    try:
+        first = client.post("/api/schedule/generate", json={"seed": 7, "attempts": 2})
+        assert first.status_code == 202
+        assert worker_started.wait(2)
+        first_job = first.json()["job"]
+
+        duplicate = client.post("/api/schedule/generate", json={"seed": 8, "attempts": 3})
+        assert duplicate.status_code == 202
+        assert duplicate.json()["already_running"] is True
+        assert duplicate.json()["job"]["id"] == first_job["id"]
+        assert client.get("/api/schedule/generation").json()["job"]["status"] == "running"
+    finally:
+        release_worker.set()
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        finished = client.get("/api/schedule/generation").json()
+        if finished["job"]["status"] == "completed":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("后台排课测试任务未完成")
+    assert finished["job"]["result"]["seed"] == 7
+
+
 def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main, "store", StateStore(tmp_path / "state.json"))
     client = TestClient(main.app)
@@ -135,7 +192,7 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
     index_response = client.get("/")
     assert index_response.status_code == 200
     assert "/assets/styles.css?v=20260827-2" in index_response.text
-    assert "/assets/app.js?v=20260827-2" in index_response.text
+    assert "/assets/app.js?v=20260831-1" in index_response.text
     assert '<span class="login-school-name">高唐县民族实验小学</span>' in index_response.text
     assert 'value="teacher">指定教师' in index_response.text
     assert "teacher-export-class" not in index_response.text
@@ -155,7 +212,7 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
     assert "主授" not in index_response.text
     assert "no-store" in index_response.headers["cache-control"]
 
-    script_response = client.get("/assets/app.js?v=20260827-2")
+    script_response = client.get("/assets/app.js?v=20260831-1")
     assert script_response.status_code == 200
     assert "no-store" in script_response.headers["cache-control"]
     assert "`${appData.state.school_name}教师课程表`" in script_response.text
@@ -163,6 +220,8 @@ def test_frontend_assets_are_versioned_and_not_cached(tmp_path, monkeypatch) -> 
     assert "function teacherRangesFromState" in script_response.text
     assert "const TEACHERS_PER_PAGE = 10" in script_response.text
     assert 'api("/api/teachers/bulk-delete"' in script_response.text
+    assert 'api("/api/schedule/generation")' in script_response.text
+    assert "正在后台编排课表" in script_response.text
     assert "主授" not in script_response.text
     assert "data-assignment-primary" not in script_response.text
 
@@ -626,9 +685,9 @@ def test_teacher_schedule_export_by_grade_or_teacher(tmp_path, monkeypatch) -> N
     ).json()["state"]["teachers"][0]
     assigned = client.put("/api/assignments/g3c1", json={"assignments": {"chinese": teacher["id"]}})
     assert assigned.status_code == 200
-    generated = client.post("/api/schedule/generate", json={"seed": 818, "attempts": 40})
-    assert generated.status_code == 200
-    assert generated.json()["result"]["success"]
+    generated = _generate_and_wait(client, {"seed": 818, "attempts": 40})
+    assert generated["job"]["status"] == "completed"
+    assert generated["job"]["result"]["success"]
 
     for url in (
         "/api/export/teachers.zip",
@@ -693,9 +752,9 @@ def test_schedule_swaps_are_atomic_and_keep_teacher_views_consistent(tmp_path, m
     client = TestClient(main.app)
     _login(client)
 
-    generated = client.post("/api/schedule/generate", json={"seed": 20260822, "attempts": 20})
-    assert generated.status_code == 200
-    assert generated.json()["result"]["success"]
+    generated = _generate_and_wait(client, {"seed": 20260822, "attempts": 20})
+    assert generated["job"]["status"] == "completed"
+    assert generated["job"]["result"]["success"]
 
     state = local_store.load()
     first_subject = state["schedule"]["lessons"]["g3c1"]["mon-am3"]["subject_id"]

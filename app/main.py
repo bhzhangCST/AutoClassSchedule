@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import os
 import re
+import hashlib
+import json
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -42,8 +47,13 @@ from .xlsx_export import XLSX_MEDIA_TYPE, build_class_schedule_xlsx, build_teach
 STATIC_DIR = PROJECT_ROOT / "static"
 TEACHER_TEMPLATE_PATH = STATIC_DIR / "教师名单导入模板.xlsx"
 MAX_TEACHER_IMPORT_BYTES = 5 * 1024 * 1024
+ACTIVE_GENERATION_STATUSES = {"queued", "running"}
 
 app = FastAPI(title="小学课程智能排课", version="1.0.0", docs_url=None, redoc_url=None)
+
+_generation_lock = threading.RLock()
+_generation_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="schedule-generation")
+_generation_job: dict[str, Any] | None = None
 
 
 @app.exception_handler(StorageError)
@@ -137,6 +147,72 @@ def _meta() -> dict[str, Any]:
 
 def _state_response() -> dict[str, Any]:
     return {"state": store.load(), "meta": _meta()}
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _state_fingerprint(state: dict[str, Any]) -> str:
+    serialized = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _generation_result_summary(result: dict[str, Any]) -> dict[str, Any]:
+    """Return the UI-facing result without duplicating the full lessons payload."""
+    return {key: deepcopy(value) for key, value in result.items() if key != "lessons"}
+
+
+def _public_generation_job(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not job:
+        return None
+    public = {
+        key: deepcopy(job.get(key))
+        for key in ("id", "status", "created_at", "started_at", "finished_at", "result", "error")
+        if job.get(key) is not None
+    }
+    return public
+
+
+def _run_generation_job(
+    job_id: str,
+    initial_state: dict[str, Any],
+    initial_fingerprint: str,
+    seed: int | None,
+    attempts: int,
+) -> None:
+    global _generation_job
+    with _generation_lock:
+        if not _generation_job or _generation_job["id"] != job_id:
+            return
+        _generation_job.update(status="running", started_at=_utc_now())
+
+    try:
+        result = generate_schedule(initial_state, seed=seed, attempts=attempts)
+        current_state = store.load()
+        if _state_fingerprint(current_state) != initial_fingerprint:
+            raise RuntimeError("排课期间学校、教师、任课配置或原课表已发生变化，本次结果未保存，请重新生成")
+        if result.get("success"):
+            current_state["schedule"] = result
+            current_state = store.save(current_state)
+
+        with _generation_lock:
+            if not _generation_job or _generation_job["id"] != job_id:
+                return
+            _generation_job.update(
+                status="completed",
+                finished_at=_utc_now(),
+                result=_generation_result_summary(result),
+            )
+    except Exception as exc:  # keep worker failures visible to the polling client
+        with _generation_lock:
+            if not _generation_job or _generation_job["id"] != job_id:
+                return
+            _generation_job.update(
+                status="error",
+                finished_at=_utc_now(),
+                error=str(exc) or "排课任务执行失败",
+            )
 
 
 @app.get("/health")
@@ -566,14 +642,41 @@ def update_assignments(class_id: str, payload: AssignmentPayload, _: dict[str, A
     return _state_response()
 
 
-@app.post("/api/schedule/generate")
+@app.post("/api/schedule/generate", status_code=status.HTTP_202_ACCEPTED)
 def create_schedule(payload: GeneratePayload, _: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    global _generation_job
+    with _generation_lock:
+        if _generation_job and _generation_job.get("status") in ACTIVE_GENERATION_STATUSES:
+            return {"job": _public_generation_job(_generation_job), "already_running": True}
+
     state = store.load()
-    result = generate_schedule(state, seed=payload.seed, attempts=payload.attempts)
-    if result.get("success"):
-        state["schedule"] = result
-        store.save(state)
-    return {"result": result, **_state_response()}
+    with _generation_lock:
+        # A second request may have started a task while this request loaded cloud data.
+        if _generation_job and _generation_job.get("status") in ACTIVE_GENERATION_STATUSES:
+            return {"job": _public_generation_job(_generation_job), "already_running": True}
+        job_id = uuid.uuid4().hex
+        _generation_job = {
+            "id": job_id,
+            "status": "queued",
+            "created_at": _utc_now(),
+        }
+        public_job = _public_generation_job(_generation_job)
+        _generation_executor.submit(
+            _run_generation_job,
+            job_id,
+            deepcopy(state),
+            _state_fingerprint(state),
+            payload.seed,
+            payload.attempts,
+        )
+    return {"job": public_job, "already_running": False}
+
+
+@app.get("/api/schedule/generation")
+def get_schedule_generation(_: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
+    with _generation_lock:
+        job = deepcopy(_generation_job)
+    return {"job": _public_generation_job(job)}
 
 
 @app.put("/api/schedule/swaps")
